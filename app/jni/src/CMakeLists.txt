@@ -1,0 +1,111 @@
+cmake_minimum_required(VERSION 3.6)
+
+project(MY_APP LANGUAGES C CXX)
+
+# Collect C++ sources from root src, RSPiX, and WishPiX
+file(GLOB ROOT_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.CPP"
+)
+file(GLOB_RECURSE RSPIX_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/*.CPP"
+)
+file(GLOB_RECURSE WISHPIX_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/*.CPP"
+)
+
+set(GAME_SOURCES ${ROOT_SOURCES} ${RSPIX_SOURCES} ${WISHPIX_SOURCES})
+list(REMOVE_DUPLICATES GAME_SOURCES)
+
+# Exclude platform-specific folders, legacy modules, and standalone/obsolete utilities
+list(FILTER GAME_SOURCES EXCLUDE REGEX "(/Win32/|/Win95/|/mac/|/DirectX/|/Carbon/|/MFC_Cntl/|/Stream/|/PlugIn/|/RAMFlx/|/Flx/|/Chips/|/MTask/|/GREEN/Joy/)")
+list(FILTER GAME_SOURCES EXCLUDE REGEX "/(BJOY|RSPiX|malphagen|alpha|goaltimer|ladder|BLiTSprite|print|rotate|text|LIST|QUEUE|ATTRIB|EVENT|UNIV|testBatch)\\.(cpp|CPP)$")
+
+add_library(main SHARED ${GAME_SOURCES})
+
+# Dynamically collect all subdirectories under RSPiX/Src/GREEN and RSPiX/Src/ORANGE as well as explicit paths
+target_include_directories(main PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../SDL/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Inc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/BLUE"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/BLUE/unix"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/CYAN"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/CYAN/Unix"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/3D"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/BLiT"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Hot"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Image"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/InputEvent"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Joy"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Mix"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/RAMFlx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Sample"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Snd"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/SndFx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Task"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/GREEN/Video"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Attribute"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/CDT"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Channel"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Chips"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/color"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Debug"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/DirtRect"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/DynaLink"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/File"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Flx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/GameLib"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/GUI"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/IFF"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/ImageTools"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Laymage"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Meter"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/MsgBox"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/MTask"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/MultiGrid"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Parse"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/PlugIn"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Props"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/QuickMath"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/RString"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/str"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RSPiX/Src/ORANGE/Stream"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/Menu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/Prefs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/ResourceManager"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WishPiX/Spry"
+)
+
+target_compile_definitions(main PRIVATE
+    LINUX
+    PLATFORM_UNIX
+    USE_SDL2
+    NOSHM
+    LOCALE=US
+    TARGET=POSTAL_2015
+    ALLOW_TWINSTICK
+)
+
+target_compile_options(main PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>
+    -fsigned-char
+    -Wno-narrowing
+    -Wno-write-strings
+    -Wno-deprecated-declarations
+    -fpermissive
+)
+
+target_link_libraries(main
+    SDL2
+    android
+    log
+    m
+)

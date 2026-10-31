@@ -1,0 +1,46 @@
+# Gradle & Android build artifacts
+.gradle/
+build/
+app/build/
+.cxx/
+app/.cxx/
+local.properties
+captures/
+.externalNativeBuild/
+
+# IDE & Editor configs
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+
+# Compiled native binaries, archives & packages
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.apk
+*.aab
+*.ap_
+*.dex
+!gradle/wrapper/gradle-wrapper.jar
+
+# Proprietary POSTAL 1 game assets (DO NOT COMMIT - requires legal copy from Steam/GOG)
+app/src/main/assets/game_data.zip
+app/src/main/assets/*.zip
+app/src/main/assets/res/
+app/src/main/assets/*.ini
+app/src/main/assets/*.INI
+res/
+POSTAL.INI
+postal.ini
+
+# Optional third-party desktop Steamworks SDK redistributables (unused on Android)
+app/jni/src/steamworks/sdk/redistributable_bin/
