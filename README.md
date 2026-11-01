@@ -48,24 +48,20 @@ A native **64-bit (`arm64-v8a`) Android port** of **POSTAL 1 (1997 / Postal Plus
 
 ## 📂 Installation & Game Data Setup
 
-1. **Download & Install the APK**:
-   Grab the latest APK from [**Releases**](https://github.com/SDKflux11/Postal1-android/releases/latest), install it on your Android device, launch it once so Android creates its data folder, and close it.
+### Option 1: All-in-One Full Installer (Recommended — No PC Required!)
+1. Go to the [**Releases**](https://github.com/SDKflux11/Postal1-android/releases/latest) section and download **`Postal_1_Full_Installer.apk`** (~304 MB).
+2. Install the APK on your Android device and launch the game.
+3. On the first launch, wait 5–10 seconds while the app automatically extracts all required game assets (`res/` and pre-configured `POSTAL.INI`) into device storage.
+4. Play right away — 360° Twin-Stick touch controls and audio work out of the box!
 
-2. **Copy Game Files from Steam / GOG**:
-   Locate your PC installation of *POSTAL 1* (e.g. `Steam\steamapps\common\POSTAL1`) and copy the **`res/`** folder and **`POSTAL.INI`** (plus a lowercase copy named **`postal.ini`**) into:
-   ```text
-   /sdcard/Android/data/org.libsdl.app/files/
-   ```
-   Example via `adb`:
-   ```bash
-   adb push "res" /sdcard/Android/data/org.libsdl.app/files/res
-   adb push "POSTAL.INI" /sdcard/Android/data/org.libsdl.app/files/POSTAL.INI
-   adb push "POSTAL.INI" /sdcard/Android/data/org.libsdl.app/files/postal.ini
-   ```
-   *(Recommended settings inside `postal.ini`: set `UseNewMouse = 0`, `UseMouse = 0`, and `Suicide = K`.)*
-
-3. **Optional — Self-Contained `game_data.zip` Build**:
-   Before building from source, you can pack `res/` and `POSTAL.INI` at the root of `app/src/main/assets/game_data.zip`. On first launch, the app will automatically unpack the archive into `/sdcard/Android/data/org.libsdl.app/files/`.
+### Option 2: Standalone Engine Build (Manual Cache Setup for Developers)
+If you compile a lightweight engine-only APK directly from source without bundling `assets/`, copy `res/` and `POSTAL.INI` from your PC installation (*Steam / GOG*) to `/sdcard/Android/data/org.libsdl.app/files/`:
+```bash
+adb push "res" /sdcard/Android/data/org.libsdl.app/files/res
+adb push "POSTAL.INI" /sdcard/Android/data/org.libsdl.app/files/POSTAL.INI
+adb push "POSTAL.INI" /sdcard/Android/data/org.libsdl.app/files/postal.ini
+```
+*(Recommended `postal.ini` settings for Twin-Stick play: `UseNewMouse = 0`, `UseMouse = 0`, and `Suicide = K`. Alternatively, pack `res/` and `POSTAL.INI` into `app/src/main/assets/game_data.zip` before building to bundle your own self-extracting APK.)*
 
 ---
 
