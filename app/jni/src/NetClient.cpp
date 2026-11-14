@@ -979,13 +979,18 @@ void CNetClient::GetMsg(
 					m_lFrameTime = (int32_t)pmsg->msg.startGame.sFrameTime;
 					m_seqMaxAhead = pmsg->msg.startGame.seqMaxAhead;
 					m_seqInputNotYetSent = m_seqMaxAhead + 1; // *SPA
+					if (pmsg->msg.startGame.sDifficulty >= 0 && pmsg->msg.startGame.sDifficulty <= 11)
+						{
+						g_GameSettings.m_sDifficulty = pmsg->msg.startGame.sDifficulty;
+						}
 					if (m_idServer < Net::MaxNumIDs && m_idServer != m_id && m_aPeers[m_idServer].m_state == CPeer::Joined)
 						{
 						FixupHostPeerAddress(m_idServer, &m_aPeers[m_idServer].m_address, &m_addressServer, true);
 						}
-					SDL_Log("[PostalNet] START_GAME: myId=%d serverId=%d realmNum=%d realmFile='%s' coopLevels=%d coopMode=%d frameTime=%d maxAhead=%u",
+					SDL_Log("[PostalNet] START_GAME: myId=%d serverId=%d realmNum=%d realmFile='%s' difficulty=%d coopLevels=%d coopMode=%d frameTime=%d maxAhead=%u",
 						(int)m_id, (int)m_idServer, (int)pmsg->msg.startGame.sRealmNum,
-						pmsg->msg.startGame.acRealmFile, (int)pmsg->msg.startGame.sCoopLevels,
+						pmsg->msg.startGame.acRealmFile, (int)pmsg->msg.startGame.sDifficulty,
+						(int)pmsg->msg.startGame.sCoopLevels,
 						(int)pmsg->msg.startGame.sCoopMode, (int)pmsg->msg.startGame.sFrameTime,
 						(unsigned)pmsg->msg.startGame.seqMaxAhead);
 

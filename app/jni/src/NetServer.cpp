@@ -937,6 +937,10 @@ void CNetServer::SetupGame(
 	m_msgSetupGame.msg.setupGame.sRealmNum = sRealmNum;
 	memcpy(m_msgSetupGame.msg.setupGame.acRealmFile, pszRealmFile, sizeof(m_msgSetupGame.msg.setupGame.acRealmFile));
 	m_msgSetupGame.msg.setupGame.acRealmFile[sizeof(m_msgSetupGame.msg.setupGame.acRealmFile)-1] = 0;
+	if (sDifficulty < 0)
+		sDifficulty = 0;
+	if (sDifficulty > 11)
+		sDifficulty = 11;
 	m_msgSetupGame.msg.setupGame.sDifficulty = sDifficulty;
 	m_msgSetupGame.msg.setupGame.sRejuvenate = sRejuvenate;
 	m_msgSetupGame.msg.setupGame.sTimeLimit = sTimeLimit;
@@ -979,6 +983,10 @@ void CNetServer::StartGame(
 	msg.msg.startGame.sRealmNum = sRealmNum;
 	memcpy(msg.msg.startGame.acRealmFile, pszRealmFile, sizeof(msg.msg.startGame.acRealmFile));
 	msg.msg.startGame.acRealmFile[sizeof(msg.msg.startGame.acRealmFile)-1] = 0;
+	if (sDifficulty < 0)
+		sDifficulty = 0;
+	if (sDifficulty > 11)
+		sDifficulty = 11;
 	msg.msg.startGame.sDifficulty = sDifficulty;
 	msg.msg.startGame.sRejuvenate = sRejuvenate;
 	msg.msg.startGame.sTimeLimit = sTimeLimit;

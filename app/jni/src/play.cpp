@@ -625,10 +625,12 @@ class CPlayInfo
 
 		bool				m_bGauntlet;					// Play challenge levels gauntlet
 		int16_t				m_bAddOn;						// Play new Add On levels
+		int16_t				m_sDifficulty;					// Realm difficulty (synced from host in MP)
 		bool				m_bRejuvenate;					// Whether to allow players to rejuvenate (MP only)
 		int16_t				m_sTimeLimit;					// Time limit for MP games (0 or negative if none)
 		int16_t				m_sKillLimit;					// Kill limit for MP games (0 or negative if none)
 		int16_t				m_sCoopLevels;					// Zero for deathmatch levels, non-zero for cooperative levels.
+		int16_t				m_sCoopMode;					// Zero for deathmatch mode, non-zero for cooperative mode.
 
 		int16_t				m_sFrameTime;					// Milliseconds per frame (MP only)
 
@@ -679,10 +681,12 @@ class CPlayInfo
 			
 			m_bGauntlet = false;
 			m_bAddOn = 0;
+			m_sDifficulty = 5;
 			m_bRejuvenate = false;
 			m_sTimeLimit = 0;
 			m_sKillLimit = 0;
 			m_sCoopLevels = 0;
+			m_sCoopMode = 0;
 
 			m_sFrameTime = 0;
 
@@ -729,10 +733,12 @@ class CPlayInfo
 		CGrip*		Grip(void)						{ return m_pgrip; }
 		bool			Gauntlet(void)					{ return m_bGauntlet; }
 		int16_t			AddOn(void)						{ return m_bAddOn; }
+		int16_t			Difficulty(void)				{ return m_sDifficulty; }
 		bool			Rejuvenate(void)				{ return m_bRejuvenate; }
 		int16_t			TimeLimit(void)				{ return m_sTimeLimit > 0 ? m_sTimeLimit : 0; }
 		int16_t			KillLimit(void)				{ return m_sKillLimit > 0 ? m_sKillLimit : 0; }
 		int16_t			CoopLevels(void)				{ return m_sCoopLevels; }
+		int16_t			CoopMode(void)					{ return m_sCoopMode; }
 		int16_t			FrameTime(void)				{ return m_sFrameTime; }
 		RFile*		DemoModeDebugMovie(void)	{ return m_pfileDemoModeDebugMovie; }
 
@@ -3760,6 +3766,12 @@ class CPlayRealm : public CPlay
 			// Clear realm (in case there's any crap left over from last realm)
 			prealm->Clear();
 
+			// Explicitly enforce multiplayer/coop/difficulty flags on the realm before loading/starting
+			// so that local POSTAL.INI settings never overwrite the host's difficulty in MP/Co-Op.
+			prealm->m_flags.bMultiplayer = pinfo->IsMP();
+			prealm->m_flags.bCoopMode = pinfo->CoopMode() ? true : false;
+			prealm->m_flags.sDifficulty = pinfo->Difficulty();
+
 			// If we're supposed to purge the SAKs . . .
 			if (pinfo->PurgeSaks() == true)
 				{
@@ -4931,6 +4943,9 @@ extern int16_t Play(										// Returns 0 if successfull, non-zero otherwise
 	info.m_bAddOn = bAddOn;
 	info.m_sFrameTime = sFrameTime;
 	info.m_sCoopLevels = sCoopLevels;
+	info.m_sCoopMode = sCoopMode;
+	info.m_sDifficulty = sDifficulty;
+	info.Realm()->m_flags.bMultiplayer = info.IsMP();
 	info.Realm()->m_flags.bCoopMode = sCoopMode ? true : false;
 	info.Realm()->m_flags.sDifficulty = sDifficulty;	// MUST be set before Play_GetRealmInfo() calls.
 	if (info.m_sRealmNum < 0)

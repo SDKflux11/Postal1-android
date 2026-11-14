@@ -1533,8 +1533,10 @@ int16_t CDispenser::GetClosestDudeDistance(	// Returns 0 on success.  Fails, if 
 		if (pdude->m_state != CThing3d::State_Dead)
 			{
 			// Determine square distance on X/Z plane.
-			ulDistX	= pdude->m_dX - m_sX;
-			ulDistZ	= pdude->m_dZ - m_sZ;
+			// Use signed int32_t cast before uint32_t to match 32-bit x86 wraparound
+			// and prevent ARM64 FCVTZU from saturating negative deltas to 0.
+			ulDistX	= (uint32_t)(int32_t)(pdude->m_dX - m_sX);
+			ulDistZ	= (uint32_t)(int32_t)(pdude->m_dZ - m_sZ);
 			ulSqrDistance	= ulDistX * ulDistX + ulDistZ * ulDistZ;
 			// If closer than the last guy . . .
 			if (ulSqrDistance < ulCurSqrDistance)

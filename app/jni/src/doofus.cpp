@@ -1245,8 +1245,10 @@ int16_t CDoofus::SelectDude(void)
 		// If this dude is not dead . . .
 		if (pdude->m_state != State_Dead)
 		{
-			ulDistX	= pdude->m_dX - m_dX;
-			ulDistZ	= pdude->m_dZ - m_dZ;
+			// Use signed int32_t cast before uint32_t to match 32-bit x86 wraparound
+			// and prevent ARM64 FCVTZU from saturating negative deltas to 0.
+			ulDistX	= (uint32_t)(int32_t)(pdude->m_dX - m_dX);
+			ulDistZ	= (uint32_t)(int32_t)(pdude->m_dZ - m_dZ);
 			ulSqrDistance	= ulDistX * ulDistX + ulDistZ * ulDistZ;
 			if (ulSqrDistance < ulCurSqrDistance)
 			{

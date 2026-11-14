@@ -414,6 +414,7 @@ int16_t CGameSettings::LoadPrefs(
 		rspMsgBox(RSP_MB_ICN_STOP | RSP_MB_BUT_OK, g_pszCriticalErrorTitle, g_pszBadPath_s_s, "File", "Realms");
 		}
 
+	pPrefs->GetVal("Game", "Difficulty", m_sDifficulty, &m_sDifficulty);
 	pPrefs->GetVal("Game", "RecentDifficulty", m_sDifficulty, &m_sDifficulty);
 	if (m_sDifficulty < 0)
 		m_sDifficulty = 0;

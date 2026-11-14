@@ -218,7 +218,7 @@
 // Local random stuff
 //
 ////////////////////////////////////////////////////////////////////////////////
-static int ms_lRandom;
+static int32_t ms_lRandom = 1;
 
 inline void MySeedRandom(int32_t seed)
 	{
