@@ -271,27 +271,30 @@ public class TouchControlsOverlayView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
-        // 1. Top service bar (always visible)
+        String eyeLabel = mCombatUiVisible ? "\uD83D\uDC41 UI" : "\uD83D\uDC41 SHOW";
+        drawPillButton(canvas, mHideUiButton, eyeLabel, false);
+
+        if (!mCombatUiVisible) {
+            return;
+        }
+
+        // 1. Top service bar
         for (VirtualButton btn : mButtons) {
             if (btn.isServiceButton) {
                 drawPillButton(canvas, btn, btn.label, false);
             }
         }
         drawPillButton(canvas, mKbButton, mKbButton.label, false);
-        String eyeLabel = mCombatUiVisible ? "\uD83D\uDC41 UI" : "\uD83D\uDC41 SHOW";
-        drawPillButton(canvas, mHideUiButton, eyeLabel, false);
 
         // 2. Left Analog Stick (360-deg move + menu D-Pad)
         drawLeftJoystick(canvas);
 
         // 3. Right Analog Aim/Auto-Fire Stick + Semicircle Combat Buttons + Top Suicide Pill
-        if (mCombatUiVisible) {
-            drawPillButton(canvas, mButtons[BTN_SUICIDE], mButtons[BTN_SUICIDE].label, true);
-            drawRightAimJoystick(canvas);
-            for (VirtualButton btn : mButtons) {
-                if (!btn.isServiceButton && btn.isCircular) {
-                    drawCircleButton(canvas, btn);
-                }
+        drawPillButton(canvas, mButtons[BTN_SUICIDE], mButtons[BTN_SUICIDE].label, true);
+        drawRightAimJoystick(canvas);
+        for (VirtualButton btn : mButtons) {
+            if (!btn.isServiceButton && btn.isCircular) {
+                drawCircleButton(canvas, btn);
             }
         }
     }
@@ -454,6 +457,9 @@ public class TouchControlsOverlayView extends View {
             mPointerControlMap.put(pointerId, CONTROL_HIDE_UI);
             toggleCombatUi();
             return true;
+        }
+        if (!mCombatUiVisible) {
+            return false;
         }
         if (mKbButton.hitTest(x, y, mHitSlop)) {
             mKbButton.pressed = true;
@@ -688,10 +694,12 @@ public class TouchControlsOverlayView extends View {
     private void toggleCombatUi() {
         mCombatUiVisible = !mCombatUiVisible;
         if (!mCombatUiVisible) {
+            resetLeftStick();
             resetRightStick();
+            mKbButton.pressed = false;
             for (int i = mPointerControlMap.size() - 1; i >= 0; i--) {
                 int ctrlId = mPointerControlMap.valueAt(i);
-                if (ctrlId >= 0 && ctrlId < mButtons.length && !mButtons[ctrlId].isServiceButton) {
+                if (ctrlId != CONTROL_HIDE_UI) {
                     mPointerControlMap.removeAt(i);
                 }
             }
