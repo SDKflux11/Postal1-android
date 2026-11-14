@@ -1637,6 +1637,13 @@ CDude::CDude(CRealm* pRealm)
 
 	m_bInvincible		= false;
 
+	m_bUseRotTS			= false;
+	m_dRotTS				= 0.0;
+	m_dJoyMoveVel		= 0.0;
+	m_dJoyMoveAngle	= 0.0;
+	m_bJoyFire			= false;
+	m_dJoyFireAngle	= 0.0;
+
 	// Base the dude number of the number of dude's in the realm.  Note that
 	// this number already includes this dude, so we subtract 1 from so the
 	// assigned dude numbers will start at 0.
@@ -3072,7 +3079,7 @@ if (!demoCompat)
 				else if (input & INPUT_FIRE_RIGHT)
 					m_dRot = 0;
 			}//Keyboard twinstick wouldn't quite work with mouse in use
-			else if (g_InputSettings.m_sUseNewMouse == FALSE) {
+			else if (g_InputSettings.m_sUseNewMouse == FALSE && !m_pRealm->m_flags.bMultiplayer) {
 				//otherwise, point in the direction we're going
 				m_dRot = m_dRotTS;
 			}
@@ -3082,7 +3089,7 @@ if (!demoCompat)
 		//m_bUseRotTS = false;
 }
 #ifdef ALLOW_TWINSTICK
-if (!demoCompat)
+if (!demoCompat && !m_pRealm->m_flags.bMultiplayer)
 {
 	GetDudeVelocity(&m_dJoyMoveVel, &m_dJoyMoveAngle);
 	if (!bCanMove)
@@ -3437,7 +3444,7 @@ else
 	// Update Velocities ////////////////////////////////////////////////////////
 
 #if defined(ALLOW_TWINSTICK)
-	if (!demoCompat && m_dJoyMoveVel != 0)
+	if (!demoCompat && !m_pRealm->m_flags.bMultiplayer && m_dJoyMoveVel != 0)
 		UpdateVelocities(dSeconds, dMaxForeVel * m_dJoyMoveVel, dMaxBackVel * m_dJoyMoveVel);
 	else
 #endif // ALLOW_TWINSTICK

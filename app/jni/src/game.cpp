@@ -4140,8 +4140,9 @@ extern void SeedRand(
 #if defined(_DEBUG) || defined(TRACENASSERT)
 	extern int32_t GetRandomDebug(char* FILE_MACRO, int32_t LINE_MACRO)
 		{
-		// Get next random number
-		int32_t lNewVal = (((m_lRandom = m_lRandom * 214013L + 2531011L) >> 16) & 0x7fff);
+		// Get next random number (explicit 32-bit arithmetic for identical x86 / ARM64 overflow)
+		m_lRandom = (int32_t)((uint32_t)m_lRandom * 214013U + 2531011U);
+		int32_t lNewVal = ((m_lRandom >> 16) & 0x7fff);
 
 		if (m_pfileRandom)
 			{
@@ -4197,8 +4198,9 @@ extern void SeedRand(
 #else
 	extern int32_t GetRandom(void)
 		{
-		// Get next random number
-		return (((m_lRandom = m_lRandom * 214013L + 2531011L) >> 16) & 0x7fff);
+		// Get next random number (explicit 32-bit arithmetic for identical x86 / ARM64 overflow)
+		m_lRandom = (int32_t)((uint32_t)m_lRandom * 214013U + 2531011U);
+		return ((m_lRandom >> 16) & 0x7fff);
 		}
 #endif	// defined(_DEBUG) || defined(TRACENASSERT).
 

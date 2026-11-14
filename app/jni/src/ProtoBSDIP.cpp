@@ -50,111 +50,36 @@
 //							leak but this was apparently not the problem.
 //
 //////////////////////////////////////////////////////////////////////////////
-//
-// WINSOCK NOTES
-// -------------
-//
-//
-// Windows NT WorkStation 4.0 only allow a maximum of 5 backlogs on listen().
-// Earlier versions of NT were also limited to 5.  NT servers defaults to 200.
-// No idea what Win95 does.
-//
-// Sockets allow for "stream" (TCP) and "datagram" (UDP).  TCP is referred to
-// as "connected", while UDP is normally connectionless.
-//
-// You can use UDP in connected mode, which saves you from having to specify
-// the destination for each send operation and also automatically discards any
-// data received from anywhere other than that same destination.  This may be
-// faster, depending on the WinSock implimentation.
-//
-// I suppose one important advantage of being "unconnected" is that you can
-// send and receive to/from multiple remote systems, which may be more suitable
-// if you were doing some sort of "star" network, where any system can talk to
-// any other system.  It seems, though, that you could simulate this with TCP
-// or connected UDP by using multiple ports, one per remote system.
-//
-// TCP is reliable, UDP is not.
-//
-// With TCP, data may be "coalesced" into larger packets before transmission,
-// which is why you need to keep calling receive until you get the amount of
-// data you were expecting.  (I also read that you might have to send until
-// all the data has been sent, which may make some sense -- you send 100 bytes,
-// but the system only needed 50 to "complete" the current data buffer, and so
-// it sends only 50 of the 100 you gave it and returns, so you have to call it
-// again to send the remaining 50).
-//
-// With UDP, data is NEVER coalesced, as it may be with TCP.  In both cases,
-// data may be split up into multiple blocks based on the maximum transmission
-// unit (MTU).  This is supposed to be transparent to the app, and it's obvious
-// how it would be with TCP, but I don't see how it could be with UDP since
-// it's supposedly unreliable.
-//
-// We can check the MTU at some point when the socket stuff hands back info
-// about the selected protocol (can't remember exact spot, but it exists).
-// Other documentation claims that there is no defined way to determine the
-// MTU.
-//
-// We might want to consider the user of broadcasting on LANs.  We might also
-// consider using UDP on LAN's (doing our own sequencing and resending of data)
-// and TCP on WAN's.  This may work well for another reason, which is that
-// I've read several times that TCP headers are usually compressed over PPP
-// links, which most people use to connect to WAN's.
-//
-// PUSH Bit Interpretation
-// By default, Windows NT versions 4.0 and 3.5x complete a recv() call when:
-// �	Data arrives with the PUSH bit set.
-// �	The user recv() buffer is full.
-// �	0.5 seconds have elapsed since any data arrived.
-// If a client program is run on a computer with a TCP/IP implementation that
-// does not set the PUSH bit on sends, response delays may result.  It�s best
-//  to correct this on the client side; however, a configuration parameter
-// (IgnorePushBitOnReceives) is added to Afd.sys to force it to treat all
-// arriving packets as though the PUSH bit were set. 
-//
-// Delayed Acknowledgments
-// Per RFC 1122, TCP uses delayed acknowledgments to reduce the number of
-// packets sent on the media. The Microsoft stack takes a common approach
-// to implementing delayed acknowledgments. The following conditions cause
-// an acknowledgment to be sent as data is received by TCP on a given
-// connection:
-// �	No ACK is sent for the previous received segment.
-// �	Segment is received, and no other segment arrives within 200ms for that connection.
-// In summary, normally an ACK is sent for every other TCP segment received
-// on a connection, unless the delayed ACK timer (200ms) expires. There is no
-// configuration parameter to disable delayed ACKs.
-//
-//
-// THINGS TO CHANGE
-// ----------------
-//
-// Do we need to impliment a checksum on UDP data?
-//
-// We need to check what type of command is being cancelled via the blocking
-// hook.  If it's an acceptable command, there's no problem.  If not, then
-// the socket becomes unusable.  It would be good if this could be done in some
-// way as to be transparent to the app.  Then again, that might not make sense,
-// because if certain operations are cancelled, it might make sense that the
-// socket is unusable.  I'm no longer sure this is really necessary.  I think
-// the general implication should be that any time a function fails, you can
-// no longer use that socket, whether it failed because it was aborted or for
-// some other reason.
-//
-// Check into how connections are currently being terminated.  Simply calling
-// closesocket() sounds like it would work, but I'm not sure how the other end
-// will react.  This needs to be worked out and implimented.
-//
-// Should we allow user to specify send and recieve buffer sizes, which some
-// winsock implimentations support?
-//
-//////////////////////////////////////////////////////////////////////////////
 
 #include "RSPiX.h"
 #include "socket.h"
+#include <ctype.h>
+#include <string.h>
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Macros
+// Portability helpers for WinSock vs POSIX/Android BSD sockets
 //////////////////////////////////////////////////////////////////////////////
+#ifdef WIN32
+	#define SOCK_SELECT_NFDS(s) 0
+	#define SOCK_SEND_FLAGS 0
+	static inline bool IsWouldBlockError(int err)
+		{
+		return (err == WSAEWOULDBLOCK);
+		}
+#else
+	#define SOCK_SELECT_NFDS(s) ((int)((s) + 1))
+	#ifdef MSG_NOSIGNAL
+		#define SOCK_SEND_FLAGS MSG_NOSIGNAL
+	#else
+		#define SOCK_SEND_FLAGS 0
+	#endif
+	static inline bool IsWouldBlockError(int err)
+		{
+		return (err == EWOULDBLOCK) || (err == EAGAIN);
+		}
+#endif
+
 
 //////////////////////////////////////////////////////////////////////////////
 // Static data
@@ -213,6 +138,8 @@ void RProtocolBSDIP::Reset(void)
 void RProtocolBSDIP::Init(void)
 	{
 	m_sock = INVALID_SOCKET;
+	m_sType = 0;
+	m_bNonBlocking = false;
 	RProtocol::Init();
 	}
 
@@ -230,30 +157,18 @@ int16_t RProtocolBSDIP::Startup(void)
 	// Only do this once, but multiple calls are not considered an error
 	if (!ms_bDidStartup)
 		{
-		// Startup winsock API.  If this fails, the typical call the WSGetLastError() is
-		// not supported, so there's no way to get a specific error code.
 		if (WSAStartup(MAKEWORD(1,1), &ms_WSAData) == 0)
 			{
 			ms_bWSAStartup = true;
 			
 			#ifdef WIN32
-			// Confirm that this winsock implimentation supports 1.1.  If it supports
-			// version greater than 1.1 in addition to 1.1, it will still return 1.1
-			// since that's what we inquired about.
 			if (LOBYTE(ms_WSAData.wVersion) == 1 && HIBYTE(ms_WSAData.wVersion) == 1)
 				{
-				// Set static hook to 0 as default
 				ms_callback = 0;
-				
-				// Set our blocking hook function
 				if (WSASetBlockingHook(RProtocolBSDIP::BlockingHook) != NULL)
 					{
 					ms_bWSASetBlockingHook = true;
-					
-					// success!
 					ms_bDidStartup = true;
-					
-					// Set protocol
 					ms_prototype = RSocket::TCPIP;
 					}
 				else
@@ -267,6 +182,10 @@ int16_t RProtocolBSDIP::Startup(void)
 				sResult = -1;
 				TRACE("RProtocolBSDIP::Startup(): Incorrect version of WinSock DLL!\n");
 				}
+			#else
+			// POSIX / Android BSD sockets require no DLL initialization
+			ms_bDidStartup = true;
+			ms_prototype = RSocket::TCPIP;
 			#endif
 			}
 		else
@@ -285,17 +204,13 @@ int16_t RProtocolBSDIP::Startup(void)
 
 
 //////////////////////////////////////////////////////////////////////////////
-//	Shutdown socket API.  This is normally called from the socket's Startup
-// function.  Since we have multiple protocols using the same winsock
-// code, the Startup and Shutdown will have to be called after creating
-//	an RSocket and before calling Open()
+//	Shutdown socket API.
 //////////////////////////////////////////////////////////////////////////////
 void RProtocolBSDIP::Shutdown(void)
 	{
 	#ifdef WIN32
 	if (ms_bWSASetBlockingHook)
 		{
-		// Remove blocking hook
 		if (WSAUnhookBlockingHook() == SOCKET_ERROR)
 			TRACE("RProtocolBSDIP::Unhook(): Error returned by WSAUnhookBlockingHook(): %ld\n", WSAGetLastError());
 		
@@ -305,7 +220,6 @@ void RProtocolBSDIP::Shutdown(void)
 
 	if (ms_bWSAStartup)
 		{
-		// Cleanup winsock API
 		if (WSACleanup() == SOCKET_ERROR)
 			TRACE("RProtocolBSDIP::Shutdown(): Error returned by WSACleanup(): %ld\n", WSAGetLastError());
 		
@@ -330,34 +244,24 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 	int16_t sOptionFlags,									// In:  Any combo of RSocket::opt* enums
 	RSocket::BLOCK_CALLBACK callback /*NULL */)	// In:  Blocking callback (or NULL to keep current)
 	{
-
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 	
-	// Make sure startup was called.  Only this function needs to do this
-	// because all the others check for a valid socket, which can only be
-	// created via this function.
 	if (ms_bDidStartup)
 		{
-		// Make sure socket isn't already open
 		if (m_sock == INVALID_SOCKET)
 			{
-			// If callback was specified, use it.
-            #ifdef WIN32
 			if (callback != NULL)
 				m_callback = callback;
-			
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
 			#endif
 
 			// Save type
 			m_sType = sType;
+			m_bNonBlocking = false;
 			
 			// Select socket type
-			int iType;
+			int iType = 0;
 			if (sType == RSocket::typStream)
 				iType = SOCK_STREAM;
 			else if (sType == RSocket::typDatagram)
@@ -367,13 +271,12 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 				sResult = -1;
 				TRACE("RProtocolBSDIP::Open(): Invalid type specified!\n");
 				}
+
 			if (sResult == 0)
 				{
-
-				// Create socket
-                #ifdef WIN32
+				#ifdef WIN32
 				ms_funcnum = RSocket::OtherFunc;
-                #endif
+				#endif
 
 				m_sock = socket(AF_INET, iType, 0);
 				if (m_sock != INVALID_SOCKET)
@@ -382,16 +285,36 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 					m_bListening = false;
 					m_bConnected = false;
 					m_bConnecting = false;
+
+					#ifndef WIN32
+					// Allow quick port reuse when re-hosting / re-browsing on Android/Linux
+					if (usPort != 0)
+						{
+						int reuse = 1;
+						setsockopt(m_sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+						}
+					#endif
 					
 					// Check if they want blocking turned off
 					if (sOptionFlags & RSocket::optDontBlock)
 						{
+						#ifdef WIN32
 						u_long ulEnableNonBlockingMode = 1;
 						if (ioctlsocket(m_sock, FIONBIO, &ulEnableNonBlockingMode) == SOCKET_ERROR)
 							{
 							sResult = -1;
-							TRACE("RProtocolBSDIP::Open(): Error setting non-blocking mode, error returned by ioctlsocket(): %ld\n", WSAGetLastError());
+							TRACE("RProtocolBSDIP::Open(): Error setting non-blocking mode: %ld\n", WSAGetLastError());
 							}
+						#else
+						int flags = fcntl(m_sock, F_GETFL, 0);
+						if ((flags < 0) || (fcntl(m_sock, F_SETFL, flags | O_NONBLOCK) < 0))
+							{
+							sResult = -1;
+							TRACE("RProtocolBSDIP::Open(): Error setting O_NONBLOCK: %d\n", WSAGetLastError());
+							}
+						#endif
+						if (sResult == 0)
+							m_bNonBlocking = true;
 						}
 
 					// Check if they want coalescing turned off
@@ -400,16 +323,16 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 						if (sType == RSocket::typStream)
 							{
 							int optval = 1;
-							if (setsockopt(m_sock, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)) == SOCKET_ERROR)
+							if (setsockopt(m_sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR)
 								{
 								sResult = -1;
-								TRACE("RProtocolBSDIP::Open(): Error setting TCP_NODELAY, error returned by setsockopt(): %ld\n", WSAGetLastError());
+								TRACE("RProtocolBSDIP::Open(): Error setting TCP_NODELAY: %d\n", (int)WSAGetLastError());
 								}
 							}
 						else
 							{
 							sResult = -1;
-							TRACE("RPRotocolBSDIP::Open(): optDontCoalesce is only valid for typStream!\n");
+							TRACE("RProtocolBSDIP::Open(): optDontCoalesce is only valid for typStream!\n");
 							}
 						}
 
@@ -418,17 +341,28 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 						{
 						if (sType == RSocket::typStream)
 							{
+							#ifdef WIN32
 							int optval = 1;
 							if (setsockopt(m_sock, SOL_SOCKET, SO_DONTLINGER, (char*)&optval, sizeof(optval)) == SOCKET_ERROR)
 								{
 								sResult = -1;
-								TRACE("RProtocolBSDIP::Open(): Error setting SO_DONTLINGER, error returned by setsockopt(): %ld\n", WSAGetLastError());
+								TRACE("RProtocolBSDIP::Open(): Error setting SO_DONTLINGER: %ld\n", WSAGetLastError());
 								}
+							#else
+							LINGER lingerOpt;
+							lingerOpt.l_onoff = 0;
+							lingerOpt.l_linger = 0;
+							if (setsockopt(m_sock, SOL_SOCKET, SO_LINGER, (const char*)&lingerOpt, sizeof(lingerOpt)) == SOCKET_ERROR)
+								{
+								sResult = -1;
+								TRACE("RProtocolBSDIP::Open(): Error setting SO_LINGER: %d\n", WSAGetLastError());
+								}
+							#endif
 							}
 						else
 							{
 							sResult = -1;
-							TRACE("RPRotocolBSDIP::Open(): optDontWaitOnClose is only valid for typStream!\n");
+							TRACE("RProtocolBSDIP::Open(): optDontWaitOnClose is only valid for typStream!\n");
 							}
 						}
 					
@@ -436,19 +370,20 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 						{
 						// Setup local address (any address is fine)
 						SOCKADDR_IN addr;
+						memset(&addr, 0, sizeof(addr));
 						addr.sin_family = AF_INET;
 						addr.sin_port = htons(usPort);
-						addr.sin_addr.s_addr = INADDR_ANY;
+						addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
 						// Bind socket to local address
-						if (bind(m_sock, (SOCKADDR*) &addr, sizeof(addr)) != SOCKET_ERROR)
+						if (::bind(m_sock, (SOCKADDR*) &addr, sizeof(addr)) != SOCKET_ERROR)
 							{
 							// success
 							}
 						else
 							{
 							sResult = -1;
-							TRACE("RProtocolBSDIP::Open(): Error returned by bind(): %ld\n", WSAGetLastError());
+							TRACE("RProtocolBSDIP::Open(): Error returned by bind(): %d\n", (int)WSAGetLastError());
 							}
 						}
 
@@ -459,11 +394,16 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 				else
 					{
 					int iErr = WSAGetLastError();
+					#ifdef WIN32
 					if (iErr == WSAEAFNOSUPPORT)
 						sResult = RSocket::errNotSupported;
+					#else
+					if ((iErr == EAFNOSUPPORT) || (iErr == EPROTONOSUPPORT))
+						sResult = RSocket::errNotSupported;
+					#endif
 					else
 						sResult = -1;
-					TRACE("RProtocolBSDIP::Open(): Error returned by socket(): %ld\n", iErr);
+					TRACE("RProtocolBSDIP::Open(): Error returned by socket(): %d\n", iErr);
 					}
 				}
 			}
@@ -476,11 +416,10 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 	else
 		{
 		sResult = -1;
-		TRACE("RProtocolBSDIP::Open(): Didn't call WSAStartup()!\n");
+		TRACE("RProtocolBSDIP::Open(): Didn't call Startup()!\n");
 		}
 
 	return sResult;
-#endif
 	}
 
 
@@ -490,45 +429,46 @@ int16_t RProtocolBSDIP::Open(							// Returns 0 if successful, non-zero otherwi
 int16_t RProtocolBSDIP::Close(							// Returns 0 if successfull, non-zero otherwise
 	bool bForceNow /*= true */)						// In:  'true' means do it now, false follows normal rules
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 
 	// Only close it if it's open, but don't consider it an error if it isn't
 	if (m_sock != INVALID_SOCKET)
 		{
-		// Set current callback
+		#ifdef WIN32
 		ms_callback = m_callback;
+		#endif
 		
 		// See if they want to force this to happen RIGHT NOW
 		if (bForceNow && (m_sType == RSocket::typStream))
 			{
-			// Set the "don't linger" option, which will cause the closesocket()
-			// to return immediately, but the underlying socket implimentation will
-			// attempt to send all unsent data before it actually closes the connection.
+			#ifdef WIN32
 			int optval = 1;
 			ms_funcnum = RSocket::OtherFunc;
 			if (setsockopt(m_sock, SOL_SOCKET, SO_DONTLINGER, (char*)&optval, sizeof(optval)) == SOCKET_ERROR)
 				{
 				sResult = -1;
-				TRACE("RProtocolBSDIP::Close(): Error setting SO_DONTLINGER, error returned by setsockopt(): %ld\n", WSAGetLastError());
+				TRACE("RProtocolBSDIP::Close(): Error setting SO_DONTLINGER: %ld\n", WSAGetLastError());
 				}
+			#else
+			LINGER lingerOpt;
+			lingerOpt.l_onoff = 0;
+			lingerOpt.l_linger = 0;
+			setsockopt(m_sock, SOL_SOCKET, SO_LINGER, (const char*)&lingerOpt, sizeof(lingerOpt));
+			#endif
 			}
 
-		// If an error occurred, we can't do the close because it might block, which
-		// is presumably the whole reason the caller asked for us to turn of lingering
 		if (sResult == 0)
 			{
-
-			// Close socket
+			#ifdef WIN32
 			ms_funcnum = RSocket::OtherFunc;
+			#endif
 			if (closesocket(m_sock) != SOCKET_ERROR)
 				{
 				// Reset flags
 				m_bListening = false;
 				m_bConnected = false;
 				m_bConnecting = false;
+				m_bNonBlocking = false;
 				
 				// Mark it as invalid
 				m_sock = INVALID_SOCKET;
@@ -536,19 +476,18 @@ int16_t RProtocolBSDIP::Close(							// Returns 0 if successfull, non-zero other
 			else
 				{
 				int iErr = WSAGetLastError();
-				if (iErr == WSAEWOULDBLOCK)
+				if (IsWouldBlockError(iErr))
 					sResult = RSocket::errWouldBlock;
 				else
 					{
 					sResult = -1;
-					TRACE("RProtocolBSDIP::Close(): Error returned by closesocket(): %ld\n", iErr);
+					TRACE("RProtocolBSDIP::Close(): Error returned by closesocket(): %d\n", iErr);
 					}
 				}
 			}
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -557,24 +496,22 @@ int16_t RProtocolBSDIP::Close(							// Returns 0 if successfull, non-zero other
 ////////////////////////////////////////////////////////////////////////////////
 int16_t RProtocolBSDIP::Broadcast(void)				// Returns 0 if successfull, non-zero otherwise
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			ms_funcnum = RSocket::OtherFunc;
+			#endif
 			
 			int optval = 1;
-			ms_funcnum = RSocket::OtherFunc;
-			if (setsockopt(m_sock, SOL_SOCKET, SO_BROADCAST, (char*)&optval, sizeof(optval)) == SOCKET_ERROR)
+			if (setsockopt(m_sock, SOL_SOCKET, SO_BROADCAST, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR)
 				{
 				sResult = -1;
-				TRACE("RProtocolBSDIP::Broadcast(): Error setting SO_BROADCAST, error returned by setsockopt(): %ld\n", WSAGetLastError());
+				TRACE("RProtocolBSDIP::Broadcast(): Error setting SO_BROADCAST: %d\n", (int)WSAGetLastError());
 				}
 			}
 		else
@@ -590,22 +527,15 @@ int16_t RProtocolBSDIP::Broadcast(void)				// Returns 0 if successfull, non-zero
 		}
 	
 	return sResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
 // Set socket to listen for connection requests
-//
-// Current winsock implimentations support a maximum of 5 queued connectons.
-// Requesting more than 5 will cause this function to return an error.
 //////////////////////////////////////////////////////////////////////////////
 int16_t RProtocolBSDIP::Listen(							// Returns 0 if successfull, non-zero otherwise
 	int16_t sMaxQueued /* = 5*/)							// In:  Maximum number of queued connection requests
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 	
 	if (m_sock != INVALID_SOCKET)
@@ -614,15 +544,11 @@ int16_t RProtocolBSDIP::Listen(							// Returns 0 if successfull, non-zero othe
 			{
 			if ((sMaxQueued >= 1) && (sMaxQueued <= 5))
 				{
-				// Set current callback
+				#ifdef WIN32
 				ms_callback = m_callback;
-				
-				// Current winsock implimentations are silently hardwired to support
-				// no more than 5 queued connections.  They will NOT complain if you
-				// set a higher number, but instead will silently set their internal
-				// value to the max value (5).  Note, however, that it could be less
-				// than 5, just not greater than 5.
 				ms_funcnum = RSocket::OtherFunc;
+				#endif
+				
 				if (listen(m_sock, (int)sMaxQueued) != SOCKET_ERROR)
 					{
 					// Socket is listening
@@ -631,7 +557,7 @@ int16_t RProtocolBSDIP::Listen(							// Returns 0 if successfull, non-zero othe
 				else
 					{
 					sResult = -1;
-					TRACE("RProtocolBSDIP::Listen(): Error returned by listen(): %ld\n", WSAGetLastError());
+					TRACE("RProtocolBSDIP::Listen(): Error returned by listen(): %d\n", (int)WSAGetLastError());
 					}
 				}
 			else
@@ -653,7 +579,6 @@ int16_t RProtocolBSDIP::Listen(							// Returns 0 if successfull, non-zero othe
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -664,55 +589,68 @@ int16_t RProtocolBSDIP::Accept(						// Returns 0 on success, non-zero otherwise
 	RSocket::RProtocol* pProtocolClient,			// I/O: Client protocol
 	RSocket::Address* paddressClient)				// Out: Client address
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			#endif
 			
-			// Make sure client socket isn't already in use
-			if (((RProtocolBSDIP*) pProtocolClient)->m_sock == INVALID_SOCKET)
+			RProtocolBSDIP* pClient = (RProtocolBSDIP*)pProtocolClient;
+			if (pClient->m_sock == INVALID_SOCKET)
 				{
-				// Client address will be filled in here.  Length must be set to available bytes
-				// before calling accept().
 				AddressIP addressClient;
+				memset(&addressClient, 0, sizeof(addressClient));
 				addressClient.prototype = RSocket::TCPIP;
 				addressClient.lAddressLen = sizeof(addressClient.address);
 				
-				// Accept a client connection.  If no client is pending, then this will block.
-				// Upon return, the specified address is filled in, and the specified length
-				// is set to the actual length of the address (in bytes).
+				#ifdef WIN32
 				ms_funcnum = RSocket::AcceptFunc;
-				((RProtocolBSDIP*)pProtocolClient)->m_sock = accept(m_sock, (SOCKADDR*)&(addressClient.address), (int*)(&addressClient.lAddressLen));
-				if (((RProtocolBSDIP*)pProtocolClient)->m_sock != INVALID_SOCKET)
+				pClient->m_sock = accept(m_sock, (SOCKADDR*)&(addressClient.address), (int*)(&addressClient.lAddressLen));
+				#else
+				SOCKLEN sockLen = (SOCKLEN)sizeof(addressClient.address);
+				pClient->m_sock = accept(m_sock, (SOCKADDR*)&(addressClient.address), &sockLen);
+				addressClient.lAddressLen = (int32_t)sockLen;
+				#endif
+
+				if (pClient->m_sock != INVALID_SOCKET)
 					{
-					
-					// Client socket is connected
-					pProtocolClient->m_bConnected = true;
-					pProtocolClient->m_bConnecting = false;
+					pClient->m_sType = RSocket::typStream;
+					pClient->m_bListening = false;
+					pClient->m_bConnected = true;
+					pClient->m_bConnecting = false;
+
+					#ifndef WIN32
+					// On Linux/Android, accept() does NOT inherit O_NONBLOCK from the listening socket!
+					if (m_bNonBlocking)
+						{
+						int flags = fcntl(pClient->m_sock, F_GETFL, 0);
+						if (flags >= 0)
+							fcntl(pClient->m_sock, F_SETFL, flags | O_NONBLOCK);
+						pClient->m_bNonBlocking = true;
+						}
+					int noDelay = 1;
+					setsockopt(pClient->m_sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&noDelay, sizeof(noDelay));
+					#endif
 
 					// If caller requested client address, return it now
 					if (paddressClient != NULL)
 						{
-						// A memcpy is perfectly safe since these structs are interchangable
 						memcpy(paddressClient, &addressClient, sizeof(RSocket::Address));
 						}
 					}
 				else
 					{
 					int iErr = WSAGetLastError();
-					if (iErr == WSAEWOULDBLOCK)
+					if (IsWouldBlockError(iErr))
 						sResult = RSocket::errWouldBlock;
 					else
 						{
 						sResult = -1;
-						TRACE("RProtocolBSDIP::AcceptClient(): Error returned by accept(): %ld\n", iErr);
+						TRACE("RProtocolBSDIP::AcceptClient(): Error returned by accept(): %d\n", iErr);
 						}
 					}
 				}
@@ -735,113 +673,127 @@ int16_t RProtocolBSDIP::Accept(						// Returns 0 on success, non-zero otherwise
 		}
 	
 	return sResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
 // Connect to address
-//
-// If the RSocket::optDontBlock option was set on this socket, then this
-// function may return RSocket::errWouldBlock, which indicates that it is
-// still trying to connect, but has not yet managed to do so.  In that case,
-// this function should be called repeatedly (polled) until it returns either
-// an actual error message other than RSocket::errWouldBlock, which would
-// indicate that the connection attempt has failed, or 0, which indicates
-// that it has actually connected successfully.
 //////////////////////////////////////////////////////////////////////////////
 int16_t RProtocolBSDIP::Connect(						// Returns 0 if successfull, non-zero otherwise
 	RSocket::Address* paddress)						// In:  Remote address to connect to
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			#endif
 				
-			// Make sure socket is not already trying to connect
 			if (!m_bConnecting)
 				{
-
-				// Try to connect to remote socket
+				#ifdef WIN32
 				ms_funcnum = RSocket::OtherFunc;
+				#endif
 				if (connect(m_sock, (SOCKADDR*)&(paddress->address), sizeof(SOCKADDR_IN)) != SOCKET_ERROR)
 					{
-					// Connected!
 					m_bConnecting = false;
 					m_bConnected = true;
 					}
 				else
 					{
 					int iErr = WSAGetLastError();
+					#ifdef WIN32
 					if (iErr == WSAEWOULDBLOCK)
 						{
-						// WSAEWOULDBLOCK indicates that connect() would have blocked.  Unlike other
-						// winsock functions, it will magically continue trying to connect!!!
 						sResult = RSocket::errWouldBlock;
 						m_bConnected = false;
 						m_bConnecting = true;
 						}
+					#else
+					if ((iErr == EINPROGRESS) || (iErr == EALREADY) || IsWouldBlockError(iErr))
+						{
+						sResult = RSocket::errWouldBlock;
+						m_bConnected = false;
+						m_bConnecting = true;
+						}
+					else if (iErr == EISCONN)
+						{
+						m_bConnecting = false;
+						m_bConnected = true;
+						}
+					#endif
 					else
 						{
 						sResult = -1;
-						TRACE("RProtocolBSDIP::Connect(): Error returned by connect(): %ld\n", iErr);
+						TRACE("RProtocolBSDIP::Connect(): Error returned by connect(): %d\n", iErr);
 						}
 					}
 				}
 			else
 				{
-				// The socket is trying to connect, so we check whether it succeeded or failed
+				// The socket is trying to connect, so poll completion status
+				fd_set wset;
+				fd_set eset;
+				FD_ZERO(&wset);
+				FD_ZERO(&eset);
+				FD_SET(m_sock, &wset);
+				FD_SET(m_sock, &eset);
 
-				// Create a set containing just this socket
-				FD_SET set;
-				FD_ZERO(&set);
-				FD_SET(m_sock, &set);
-
-				// Set time value to 0, which makes this into a polling operation
 				TIMEVAL timeval = { 0, 0 };
 
-				// Select exception/error sockets
+				#ifdef WIN32
 				ms_funcnum = RSocket::SelectFunc;
-				int32_t lCount = select(0, NULL, NULL, &set, &timeval);
-				if (lCount == 0)
+				#endif
+				int32_t lCount = select(SOCK_SELECT_NFDS(m_sock), NULL, &wset, &eset, &timeval);
+				if (lCount > 0)
 					{
-					// Create a set containing just this socket
-					FD_SET set;
-					FD_ZERO(&set);
-					FD_SET(m_sock, &set);
-
-					// Set time value to 0, which makes this into a polling operation
-					TIMEVAL timeval = { 0, 0 };
-
-					// Select writable sockets
-					ms_funcnum = RSocket::SelectFunc;
-					int32_t lCount = select(0, NULL, &set, NULL, &timeval);
-					if (lCount > 0)
+					#ifdef WIN32
+					if (FD_ISSET(m_sock, &eset))
 						{
-						// Connected!
+						m_bConnecting = false;
+						m_bConnected = false;
+						sResult = -1;
+						TRACE("RProtocolBSDIP::Connect(): Non-blocking connection attempt has failed!\n");
+						}
+					else if (FD_ISSET(m_sock, &wset))
+						{
 						m_bConnecting = false;
 						m_bConnected = true;
 						}
 					else
 						{
-						// Return the "would block" error, which means we're still trying to connect
 						sResult = RSocket::errWouldBlock;
 						}
+					#else
+					int soErr = 0;
+					SOCKLEN soLen = sizeof(soErr);
+					if ((getsockopt(m_sock, SOL_SOCKET, SO_ERROR, (char*)&soErr, &soLen) == 0) && (soErr == 0))
+						{
+						m_bConnecting = false;
+						m_bConnected = true;
+						}
+					else
+						{
+						m_bConnecting = false;
+						m_bConnected = false;
+						sResult = -1;
+						TRACE("RProtocolBSDIP::Connect(): Non-blocking connection failed (SO_ERROR=%d)!\n", soErr);
+						}
+					#endif
+					}
+				else if (lCount == 0)
+					{
+					sResult = RSocket::errWouldBlock;
 					}
 				else
 					{
-					// Connection attempt has failed
 					m_bConnecting = false;
 					m_bConnected = false;
 					sResult = -1;
-					TRACE("RProtocolBSDIP::Connect(): Non-blocking connection attempt has failed!\n");
+					TRACE("RProtocolBSDIP::Connect(): select() error while connecting!\n");
 					}
 				}
 			}
@@ -858,7 +810,6 @@ int16_t RProtocolBSDIP::Connect(						// Returns 0 if successfull, non-zero othe
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -871,10 +822,8 @@ int16_t RProtocolBSDIP::Send(							// Returns 0 on success, non-zero otherwise
 	int32_t lNumBytes,										// In:  Number of bytes to send
 	int32_t* plActualBytes)									// Out: Actual number of bytes sent
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
+	*plActualBytes = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
@@ -882,22 +831,26 @@ int16_t RProtocolBSDIP::Send(							// Returns 0 on success, non-zero otherwise
 			{
 			if (m_bConnected)
 				{
-				// Set current callback
+				#ifdef WIN32
 				ms_callback = m_callback;
-				
-				// Send data
 				ms_funcnum = RSocket::OtherFunc;
-				*plActualBytes = send(m_sock, (char*)pBuf, lNumBytes, 0);
-				if (*plActualBytes == SOCKET_ERROR)
+				#endif
+				
+				ssize_t nSent = send(m_sock, (const char*)pBuf, (size_t)lNumBytes, SOCK_SEND_FLAGS);
+				if (nSent >= 0)
+					{
+					*plActualBytes = (int32_t)nSent;
+					}
+				else
 					{
 					*plActualBytes = 0;
 					int iErr = WSAGetLastError();
-					if (iErr == WSAEWOULDBLOCK)
+					if (IsWouldBlockError(iErr))
 						sResult = RSocket::errWouldBlock;
 					else
 						{
 						sResult = -1;
-						TRACE("RProtocolBSDIP::Send(): Error returned by send(): %ld\n", iErr);
+						TRACE("RProtocolBSDIP::Send(): Error returned by send(): %d\n", iErr);
 						}
 					}
 				}
@@ -920,7 +873,6 @@ int16_t RProtocolBSDIP::Send(							// Returns 0 on success, non-zero otherwise
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -934,31 +886,92 @@ int16_t RProtocolBSDIP::SendTo(							// Returns 0 on success, non-zero otherwis
 	int32_t* plActualBytes,									// Out: Actual number of bytes sent
 	RSocket::Address* paddress)						// In:  Address to send to
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
+	*plActualBytes = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
-			
-			// Send data
 			ms_funcnum = RSocket::OtherFunc;
-			*plActualBytes = sendto(m_sock, (char*)pBuf, lNumBytes, 0, (SOCKADDR*)&(paddress->address), paddress->lAddressLen);
-			if (*plActualBytes == SOCKET_ERROR)
+			#endif
+
+			AddressIP* pip = (AddressIP*)paddress;
+			bool bSentAnyBroadcast = false;
+
+			#ifndef WIN32
+			// On Android Wi-Fi / Mobile Hotspots without cellular data, 255.255.255.255 may fail with ENETUNREACH
+			// because there is no default route. Also send directed subnet broadcasts (e.g. 192.168.43.255) on all
+			// active IPv4 broadcast interfaces so LAN / Hotspot Co-Op server discovery works offline!
+			if (pip->address.sin_addr.s_addr == htonl(INADDR_BROADCAST))
+				{
+				char ifBuf[4096];
+				struct ifconf ifc;
+				memset(&ifc, 0, sizeof(ifc));
+				ifc.ifc_len = sizeof(ifBuf);
+				ifc.ifc_buf = ifBuf;
+				if (ioctl(m_sock, SIOCGIFCONF, &ifc) == 0)
+					{
+					int numReqs = ifc.ifc_len / (int)sizeof(struct ifreq);
+					struct ifreq* ifr = ifc.ifc_req;
+					for (int i = 0; i < numReqs; i++)
+						{
+						struct ifreq reqFlags = ifr[i];
+						if (ioctl(m_sock, SIOCGIFFLAGS, &reqFlags) == 0)
+							{
+							if ((reqFlags.ifr_flags & IFF_UP) &&
+								(reqFlags.ifr_flags & IFF_BROADCAST) &&
+								!(reqFlags.ifr_flags & IFF_LOOPBACK))
+								{
+								struct ifreq reqBrd = ifr[i];
+								if (ioctl(m_sock, SIOCGIFBRDADDR, &reqBrd) == 0 &&
+									reqBrd.ifr_broadaddr.sa_family == AF_INET)
+									{
+									SOCKADDR_IN brdAddr = pip->address;
+									brdAddr.sin_addr = ((SOCKADDR_IN*)&reqBrd.ifr_broadaddr)->sin_addr;
+									if (brdAddr.sin_addr.s_addr != htonl(INADDR_ANY) &&
+										brdAddr.sin_addr.s_addr != htonl(INADDR_BROADCAST))
+										{
+										ssize_t nBrd = sendto(m_sock, (const char*)pBuf, (size_t)lNumBytes,
+											SOCK_SEND_FLAGS, (SOCKADDR*)&brdAddr, sizeof(brdAddr));
+										if (nBrd == lNumBytes)
+											bSentAnyBroadcast = true;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			#endif
+			
+			// Send data to the requested destination address
+			SOCKLEN sockLen = (paddress->prototype == RSocket::TCPIP)
+				? (SOCKLEN)sizeof(SOCKADDR_IN)
+				: (SOCKLEN)paddress->lAddressLen;
+			ssize_t nSent = sendto(m_sock, (const char*)pBuf, (size_t)lNumBytes, SOCK_SEND_FLAGS,
+				(SOCKADDR*)&(paddress->address), sockLen);
+			if (nSent >= 0)
+				{
+				*plActualBytes = (int32_t)nSent;
+				}
+			else if (bSentAnyBroadcast)
+				{
+				// Directed subnet broadcast succeeded even though 255.255.255.255 had no default route
+				*plActualBytes = lNumBytes;
+				}
+			else
 				{
 				*plActualBytes = 0;
 				int iErr = WSAGetLastError();
-				if (iErr == WSAEWOULDBLOCK)
+				if (IsWouldBlockError(iErr))
 					sResult = RSocket::errWouldBlock;
 				else
 					{
 					sResult = -1;
-					TRACE("RProtocolBSDIP::SendTo(): Error returned by sendto(): %ld\n", iErr);
+					TRACE("RProtocolBSDIP::SendTo(): Error returned by sendto(): %d\n", iErr);
 					}
 				}
 			}
@@ -975,29 +988,11 @@ int16_t RProtocolBSDIP::SendTo(							// Returns 0 on success, non-zero otherwis
 		}
 	
 	return sResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
 // Receive data - only valid with connected sockets
-//
-// For datagram (UDP) sockets, there is a one-to-one correspondence between
-// sends and receives.  Each send implies a matching receive.  The specified
-// buffer must at least as large as the amount of data that was sent, or the
-// data will be truncated and an error will be returned.
-//
-// For stream (TCP) sockets, there is no direct correspondence between sends
-// and receive.  One send can be broken up and require multiple receives, and
-// and multiple sends can be coalesced into a single recieve.  There is no
-// limitation on the amount of data being received.
-//
-// For stream (TCP) sockets, if the actual number of bytes received is 0, it
-// means the other end disconnected gracefully.
-//
-// In all cases, if the connection was abortively disconnected, an error will
-// be returned.
-//
 // NOTE: If an error occurs, plActualBytes will return 0.
 //////////////////////////////////////////////////////////////////////////////
 int16_t RProtocolBSDIP::Receive(						// Returns 0 on success, non-zero otherwise
@@ -1005,10 +1000,8 @@ int16_t RProtocolBSDIP::Receive(						// Returns 0 on success, non-zero otherwis
 	int32_t lMaxBytes,										// In:  Maximum number of bytes that fit in the buffer
 	int32_t* plActualBytes)									// Out: Actual number of bytes recieved into the buffer
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
+	*plActualBytes = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
@@ -1016,22 +1009,26 @@ int16_t RProtocolBSDIP::Receive(						// Returns 0 on success, non-zero otherwis
 			{
 			if (m_bConnected)
 				{
-				// Set current callback
+				#ifdef WIN32
 				ms_callback = m_callback;
-				
-				// Receive data
 				ms_funcnum = RSocket::OtherFunc;
-				*plActualBytes = recv(m_sock, (char*)pBuf, lMaxBytes, 0);
-				if (*plActualBytes == SOCKET_ERROR)
+				#endif
+				
+				ssize_t nRecv = recv(m_sock, (char*)pBuf, (size_t)lMaxBytes, 0);
+				if (nRecv >= 0)
+					{
+					*plActualBytes = (int32_t)nRecv;
+					}
+				else
 					{
 					*plActualBytes = 0;
 					int iErr = WSAGetLastError();
-					if (iErr == WSAEWOULDBLOCK)
+					if (IsWouldBlockError(iErr))
 						sResult = RSocket::errWouldBlock;
 					else
 						{
 						sResult = -1;
-						TRACE("RProtocolBSDIP::Receive(): Error returned by recv(): %ld\n", iErr);
+						TRACE("RProtocolBSDIP::Receive(): Error returned by recv(): %d\n", iErr);
 						}
 					}
 				}
@@ -1044,7 +1041,7 @@ int16_t RProtocolBSDIP::Receive(						// Returns 0 on success, non-zero otherwis
 		else
 			{
 			sResult = -1;
-			TRACE("RProtcolWinTcpip::Receive(): Socket is listening -- can't receive data!\n");
+			TRACE("RProtocolBSDIP::Receive(): Socket is listening -- can't receive data!\n");
 			}
 		}
 	else
@@ -1054,7 +1051,6 @@ int16_t RProtocolBSDIP::Receive(						// Returns 0 on success, non-zero otherwis
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -1068,32 +1064,37 @@ int16_t RProtocolBSDIP::ReceiveFrom(					// Returns 0 on success, non-zero other
 	int32_t* plActualBytes,									// Out: Actual number of bytes recieved into buffer
 	RSocket::Address* paddress)						// Out: Source address returned here
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
+	*plActualBytes = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			ms_funcnum = RSocket::OtherFunc;
+			#endif
 			
 			// Source address
 			AddressIP addr;
+			memset(&addr, 0, sizeof(addr));
 			addr.prototype = RSocket::TCPIP;
 			addr.lAddressLen = sizeof(addr.address);
 			
-			// Receive data
-			ms_funcnum = RSocket::OtherFunc;
-			*plActualBytes = recvfrom(m_sock, (char*)pBuf, lMaxBytes, 0, (SOCKADDR*)&(addr.address), (int*)(&addr.lAddressLen));
-			if (*plActualBytes != SOCKET_ERROR)
+			#ifdef WIN32
+			ssize_t nRecv = recvfrom(m_sock, (char*)pBuf, lMaxBytes, 0, (SOCKADDR*)&(addr.address), (int*)(&addr.lAddressLen));
+			#else
+			SOCKLEN sockLen = (SOCKLEN)sizeof(addr.address);
+			ssize_t nRecv = recvfrom(m_sock, (char*)pBuf, (size_t)lMaxBytes, 0, (SOCKADDR*)&(addr.address), &sockLen);
+			addr.lAddressLen = (int32_t)sockLen;
+			#endif
+
+			if (nRecv >= 0)
 				{
-				// If caller requested source address, return it now
+				*plActualBytes = (int32_t)nRecv;
 				if (paddress != NULL)
 					{
-					// A memcpy is perfectly safe since these structs are interchangable
 					memcpy(paddress, &addr, sizeof(RSocket::Address));
 					}
 				}
@@ -1101,12 +1102,12 @@ int16_t RProtocolBSDIP::ReceiveFrom(					// Returns 0 on success, non-zero other
 				{
 				*plActualBytes = 0;
 				int iErr = WSAGetLastError();
-				if (iErr == WSAEWOULDBLOCK)
+				if (IsWouldBlockError(iErr))
 					sResult = RSocket::errWouldBlock;
 				else
 					{
 					sResult = -1;
-					TRACE("RProtocolBSDIP::ReceiveFrom(): Error returned by recvfrom(): %ld\n", iErr);
+					TRACE("RProtocolBSDIP::ReceiveFrom(): Error returned by recvfrom(): %d\n", iErr);
 					}
 				}
 			}
@@ -1123,7 +1124,6 @@ int16_t RProtocolBSDIP::ReceiveFrom(					// Returns 0 on success, non-zero other
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -1132,191 +1132,158 @@ int16_t RProtocolBSDIP::ReceiveFrom(					// Returns 0 on success, non-zero other
 //////////////////////////////////////////////////////////////////////////////
 bool RProtocolBSDIP::CanAcceptWithoutBlocking(void)
 	{
-#if PLATFORM_UNIX
-    return(false);
-#else
 	bool bResult = false;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			ms_funcnum = RSocket::SelectFunc;
+			#endif
 			
-			// Create a set containing just this socket
-			FD_SET set;
+			fd_set set;
 			FD_ZERO(&set);
 			FD_SET(m_sock, &set);
 			
-			// Set time value to 0, which makes this into a polling operation
 			TIMEVAL timeval = { 0, 0 };
 			
-			// Select listening sockets that have actual connections pending
-			ms_funcnum = RSocket::SelectFunc;
-			int32_t lCount = select(0, &set, NULL, NULL, &timeval);
+			int32_t lCount = select(SOCK_SELECT_NFDS(m_sock), &set, NULL, NULL, &timeval);
 			if (lCount > 0)
 				bResult = true;
 			}
 		else
 			{
-			//sResult = -1;
 			TRACE("RProtocolBSDIP::CanAcceptWithoutBlocking(): Socket is not listening!\n");
 			}
 		}
 	else
 		{
-		//sResult = -1;
 		TRACE("RProtocolBSDIP::CanAcceptWithoutBlocking(): Socket is not open!\n");
 		}
 	
 	return bResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Check if socket can send without blocking.  There is no way of knowing
-// how long this will be true, especially in a multi-threading environment
+// Check if socket can send without blocking.
 //////////////////////////////////////////////////////////////////////////////
 bool RProtocolBSDIP::CanSendWithoutBlocking(void)
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	bool bResult = false;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			ms_funcnum = RSocket::SelectFunc;
+			#endif
 			
-			// Create a set containing just this socket
-			FD_SET set;
+			fd_set set;
 			FD_ZERO(&set);
 			FD_SET(m_sock, &set);
 			
-			// Set time value to 0, which makes this into a polling operation
 			TIMEVAL timeval = { 0, 0 };
 			
-			// Select writable sockets
-			ms_funcnum = RSocket::SelectFunc;
-			int32_t lCount = select(0, NULL, &set, NULL, &timeval);
+			int32_t lCount = select(SOCK_SELECT_NFDS(m_sock), NULL, &set, NULL, &timeval);
 			if (lCount > 0)
 				bResult = true;
 			}
 		else
 			{
-			//sResult = -1;
 			TRACE("RProtocolBSDIP::CanSendWithoutBlocking(): Socket is listening -- can't send data!\n");
 			}
 		}
 	else
 		{
-		//sResult = -1;
 		TRACE("RProtocolBSDIP::CanSendWithoutBlocking(): Socket is not open!\n");
 		}
 	
 	return bResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Check if socket can be read without blocking.  For datagrams 'true' means 
-// queued data is available.  For streams 'true' means the connection has been
-// closed.  If it was grecefully closed, the next read will return 0 bytes read.
-// If it was aborted, the next read will return with an error.
+// Check if socket can be read without blocking.
 //////////////////////////////////////////////////////////////////////////////
 bool RProtocolBSDIP::CanReceiveWithoutBlocking(void)
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	bool bResult = false;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
+			ms_funcnum = RSocket::SelectFunc;
+			#endif
 			
-			// Create a set containing just this socket
-			FD_SET set;
+			fd_set set;
 			FD_ZERO(&set);
 			FD_SET(m_sock, &set);
 			
-			// Set time value to 0, which makes this into a polling operation
 			TIMEVAL timeval = { 0, 0 };
 			
-			// Select readable sockets
-			ms_funcnum = RSocket::SelectFunc;
-			int32_t lCount = select(0, &set, NULL, NULL, &timeval);
+			int32_t lCount = select(SOCK_SELECT_NFDS(m_sock), &set, NULL, NULL, &timeval);
 			if (lCount > 0)
 				bResult = true;
 			}
 		else
 			{
-			//sResult = -1;
 			TRACE("RProtocolBSDIP::CanReceiveWithoutBlocking(): Socket is listening -- can't receive data!\n");
 			}
 		}
 	else
 		{
-		//sResult = -1;
 		TRACE("RProtocolBSDIP::CanReceiveWithoutBlocking(): Socket is not open!\n");
 		}
 	
 	return bResult;
-#endif
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Check the number of bytes of data receivable without blocking.  For
-// datagrams this returns the size of the next queued datagram.  For streams
-// this returns the total amount of data that can be read with a single
-// Receive() which is normally equal to the total amount of queued data.
+// Check the number of bytes of data receivable without blocking.
 //////////////////////////////////////////////////////////////////////////////
 int32_t RProtocolBSDIP::CheckReceivableBytes(void)
 	{
-#if PLATFORM_UNIX
-    return(0);  // !!! FIXME
-#else
-	u_long lResult = 0;
+	int32_t lResult = 0;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
 		if (!m_bListening)
 			{
-			// Set current callback
+			#ifdef WIN32
 			ms_callback = m_callback;
-			
-			// Get amount of data available for reading
 			ms_funcnum = RSocket::OtherFunc;
-			if (ioctlsocket(m_sock, FIONREAD, &lResult) == SOCKET_ERROR)
-				{
-				lResult = 0;
-				TRACE("RProtocolBSDIP::GetAvailableForReceive(): Error returned by ioctrlsocket(): %ld\n", WSAGetLastError());
-				}
+			u_long ulAvail = 0;
+			if (ioctlsocket(m_sock, FIONREAD, &ulAvail) != SOCKET_ERROR)
+				lResult = (int32_t)ulAvail;
+			else
+				TRACE("RProtocolBSDIP::CheckReceivableBytes(): Error returned by ioctlsocket(): %ld\n", WSAGetLastError());
+			#else
+			// On 64-bit LP64 Linux/Android, FIONREAD expects an int*, NOT an 8-byte unsigned long*!
+			int nAvail = 0;
+			if (ioctl(m_sock, FIONREAD, &nAvail) == 0 && nAvail > 0)
+				lResult = (int32_t)nAvail;
+			#endif
 			}
 		else
 			{
-			//sResult = -1;
-			TRACE("RProtocolBSDIP::CanReceiveWithoutBlocking(): Socket is listening -- can't receive data!\n");
+			TRACE("RProtocolBSDIP::CheckReceivableBytes(): Socket is listening -- can't receive data!\n");
 			}
 		}
 	else
 		{
-		//sResult = -1;
-		TRACE("RProtocolBSDIP::CanReceiveWithoutBlocking(): Socket is not open!\n");
+		TRACE("RProtocolBSDIP::CheckReceivableBytes(): Socket is not open!\n");
 		}
 	
 	return lResult;
-#endif
 	}
 
 
@@ -1325,33 +1292,27 @@ int32_t RProtocolBSDIP::CheckReceivableBytes(void)
 //////////////////////////////////////////////////////////////////////////////
 bool RProtocolBSDIP::IsError(void)
 	{
-#if PLATFORM_UNIX
-    return(true);  // !!! FIXME
-#else
 	bool bResult = false;
 	
 	if (m_sock != INVALID_SOCKET)
 		{
-		// Set current callback
+		#ifdef WIN32
 		ms_callback = m_callback;
+		ms_funcnum = RSocket::SelectFunc;
+		#endif
 		
-		// Create a set containing just this socket
-		FD_SET set;
+		fd_set set;
 		FD_ZERO(&set);
 		FD_SET(m_sock, &set);
 		
-		// Set time value to 0, which makes this into a polling operation
 		TIMEVAL timeval = { 0, 0 };
 		
-		// Select exception/error sockets
-		ms_funcnum = RSocket::SelectFunc;
-		int32_t lCount = select(0, NULL, NULL, &set, &timeval);
+		int32_t lCount = select(SOCK_SELECT_NFDS(m_sock), NULL, NULL, &set, &timeval);
 		if (lCount > 0)
 			bResult = true;
 		}
 	
 	return bResult;
-#endif
 	}
 
 
@@ -1383,28 +1344,26 @@ int16_t RProtocolBSDIP::GetMaxDatagramSize(			// Returns zero on success, non-ze
 	{
 	int16_t sResult = 0;
 	
-    #ifdef WIN32
 	if (ms_bDidStartup)
 		{
+		#ifdef WIN32
 		*plSize = (int32_t)ms_WSAData.iMaxUdpDg;
+		#else
+		*plSize = 65507;
+		#endif
 		}
 	else
 		{
 		sResult = -1;
 		TRACE("RProtocolBSDIP::GetMaxDatagramSize(): Never called Startup()!\n");
 		}
-    #else
-    *plSize = 1024;   // uh, sure.
-    #endif
 
 	return sResult;
 	}
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Get maximum number of sockets.  This may be a system "global" value, which
-// means that if other applications are using sockets, then the number
-// available to this application may be lower than the returned value.
+// Get maximum number of sockets.
 //////////////////////////////////////////////////////////////////////////////
 /* static */
 int16_t RProtocolBSDIP::GetMaxSockets(				// Returns 0 if successfull, non-zero otherwise
@@ -1412,19 +1371,19 @@ int16_t RProtocolBSDIP::GetMaxSockets(				// Returns 0 if successfull, non-zero 
 	{
 	int16_t sResult = 0;
 
-	#ifdef WIN32
 	if (ms_bDidStartup)
 		{
+		#ifdef WIN32
 		*plNum = (int32_t)ms_WSAData.iMaxSockets;
+		#else
+		*plNum = 256;
+		#endif
 		}
 	else
 		{
 		sResult = -1;
 		TRACE("RProtocolBSDIP::GetMaxSockets(): Never called Startup()!\n");
 		}
-	#else
-	*plNum = 25;  // uh...ok.
-	#endif
 	return sResult;
 	}
 
@@ -1439,66 +1398,82 @@ int16_t RProtocolBSDIP::GetAddress(					// Returns 0 if successfull, non-zero ot
 	uint16_t usPort,											// In:  Host's port number
 	RSocket::Address* paddress)						// Out: Address
 	{
-#if PLATFORM_UNIX
-    return(-1);  // !!! FIXME
-#else
 	int16_t sResult = 0;
 	
 	if (ms_bDidStartup)
 		{
-		// Cast address to IP address to make it easier to work with
+		// Trim leading/trailing whitespace that soft keyboards sometimes append
+		char szClean[256];
+		while (*pszName == ' ' || *pszName == '\t')
+			pszName++;
+		strncpy(szClean, pszName, sizeof(szClean) - 1);
+		szClean[sizeof(szClean) - 1] = '\0';
+		size_t len = strlen(szClean);
+		while (len > 0 && (szClean[len - 1] == ' ' || szClean[len - 1] == '\t' || szClean[len - 1] == '\r' || szClean[len - 1] == '\n'))
+			szClean[--len] = '\0';
+
 		AddressIP* pip = (AddressIP*)paddress;
+		memset(pip, 0, sizeof(*pip));
 		
-		// If the string contains only digits and/or dots and there's at least one dot
-		// then we assume it's a dotted address.
-		if ((strspn(pszName, "0123456789.") >= strlen(pszName)) && (strchr(pszName, '.') != NULL))
+		if (len == 0)
 			{
-			// Convert dotted address into value (returned in network order!)
-			uint32_t ulAddr = inet_addr(pszName);
-			if (ulAddr != INADDR_NONE)
+			return -1;
+			}
+
+		// Check if string is a dotted IPv4 address
+		if ((strspn(szClean, "0123456789.") >= len) && (strchr(szClean, '.') != NULL))
+			{
+			struct in_addr inAddr;
+			#ifdef WIN32
+			uint32_t ulAddr = inet_addr(szClean);
+			bool bValid = (ulAddr != INADDR_NONE);
+			inAddr.S_un.S_addr = ulAddr;
+			#else
+			bool bValid = (inet_aton(szClean, &inAddr) != 0);
+			#endif
+			if (bValid)
 				{
-				// Fill in the address
 				pip->prototype = RSocket::TCPIP;
 				pip->lAddressLen = sizeof(pip->address);
 				pip->address.sin_family = AF_INET;
-				pip->address.sin_addr.S_un.S_addr = ulAddr;
+				pip->address.sin_addr = inAddr;
 				pip->address.sin_port = htons(usPort);
 				}
 			else
 				{
 				sResult = -1;
-				TRACE("RProtocolBSDIP::GetAddress(): Invalid dotted address: %s\n", pszName);
+				TRACE("RProtocolBSDIP::GetAddress(): Invalid dotted address: %s\n", szClean);
 				}
 			}
 		else
 			{
-			// Lookup address based on specified name
+			#ifdef WIN32
 			ms_funcnum = RSocket::OtherFunc;
-			HOSTENT* phost = gethostbyname(pszName);
-			if (phost != NULL)
+			#endif
+			HOSTENT* phost = gethostbyname(szClean);
+			if (phost != NULL && phost->h_addr_list != NULL && phost->h_addr_list[0] != NULL)
 				{
-				// Fill in the address
 				pip->prototype = RSocket::TCPIP;
 				pip->lAddressLen = sizeof(pip->address);
-				pip->address.sin_family = phost->h_addrtype;
-				memcpy((char*)&(pip->address.sin_addr), phost->h_addr_list[0], phost->h_length);
+				pip->address.sin_family = AF_INET;
+				memcpy((char*)&(pip->address.sin_addr), phost->h_addr_list[0],
+					(size_t)phost->h_length <= sizeof(pip->address.sin_addr) ? (size_t)phost->h_length : sizeof(pip->address.sin_addr));
 				pip->address.sin_port = htons(usPort);
 				}
 			else
 				{
 				sResult = -1;
-				TRACE("RProtocolBSDIP::GetAddress(): Error returned by gethostbyname(): %ld\n", WSAGetLastError());
+				TRACE("RProtocolBSDIP::GetAddress(): Error returned by gethostbyname() for '%s'\n", szClean);
 				}
 			}
 		}
 	else
 		{
 		sResult = -1;
-		TRACE("RProtocolBSDIP::GetHostAddress(): Never called Startup()!\n");
+		TRACE("RProtocolBSDIP::GetAddress(): Never called Startup()!\n");
 		}
 	
 	return sResult;
-#endif
 	}
 
 
@@ -1510,20 +1485,19 @@ void RProtocolBSDIP::CreateBroadcastAddress(
 	uint16_t usPort,								// In:  Port to broadcast to
 	RSocket::Address* paddress)						// Out: Broadcast address returned here
 	{
-	// Cast address to IP address to make it easier to work with
 	AddressIP* pip = (AddressIP*)paddress;
+	memset(pip, 0, sizeof(*pip));
 	
-	// Create broadcast address using specified port
 	pip->prototype = RSocket::TCPIP;
 	pip->lAddressLen = sizeof(pip->address);
 	pip->address.sin_family = AF_INET;
 	pip->address.sin_port = htons(usPort);
 
-    #ifdef WIN32
+	#ifdef WIN32
 	pip->address.sin_addr.S_un.S_addr = htonl(INADDR_BROADCAST);
-    #else
+	#else
 	pip->address.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    #endif
+	#endif
 	}
 
 
@@ -1555,31 +1529,16 @@ void RProtocolBSDIP::SetAddressPort(
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// This is a blocking-hook callback function.
-// The winsock code will call this repeatedly while the return value is
-// non-zero, but the documentation implies that it doesn't do anything else
-// while calling this, so it seems like a better idea to return 0 all the time.
+// This is a blocking-hook callback function (Win32 only).
 ////////////////////////////////////////////////////////////////////////////////
 /* static */
 #ifdef WIN32
 intptr_t CALLBACK RProtocolBSDIP::BlockingHook(void)
 	{
-	// !!!
-	// The only Windows Socket API function you can call from this
-	// function is WSACancelBlockingCall()
-	// !!!
-	
-	// Call user-installed callback.  If return value is non-zero, cancel
-	// the current blocking call.
 	if (ms_callback != 0)
 		{
 		if ((*ms_callback)() != 0)
 			{
-			// Cancelling accept() or select() is fine --  only that particular
-			// operation will fail, and the socket itself will be unaffected.
-			// Cancelling any other operation will leave the socket in an unknown/
-			// unstable state.  The only function you can call after cancelling
-			// operations other than accept() or select() is closesocket().
 			WSACancelBlockingCall();
 			}
 		}

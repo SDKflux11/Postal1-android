@@ -100,9 +100,10 @@ inline void GetSocketAddress(
 	RSocket::Address* paddress)
 	{
 	// Stuff that's common to all sockets
-	int32_t lTmp;
+	paddress->Reset();
+	int32_t lTmp = 0;
 	pBuf->Get(&lTmp);
- 	paddress->prototype = (RSocket::ProtoType)lTmp;
+	paddress->prototype = (RSocket::ProtoType)lTmp;
 	pBuf->Get(&paddress->lAddressLen);
 
 	// The rest is protocol-dependant
@@ -111,16 +112,19 @@ inline void GetSocketAddress(
 		case RSocket::TCPIP:
 			{
 			RProtocolBSDIP::AddressIP* p = (RProtocolBSDIP::AddressIP*)paddress;
-			pBuf->Get(&p->address.sin_family);
+			p->lAddressLen = (int32_t)sizeof(SOCKADDR_IN);
+			U16 u16Family = 0;
+			pBuf->Get(&u16Family);
+			p->address.sin_family = (sa_family_t)u16Family;
 			// Don't byte-swap these!!!  They are always in network order on all systems!
-			pBuf->Get((U8*)&p->address.sin_port, sizeof(p->address.sin_port));
-			pBuf->Get((U8*)&p->address.sin_addr, sizeof(p->address.sin_addr));
-			pBuf->Get((U8*)&p->address.sin_zero, sizeof(p->address.sin_zero));
+			pBuf->Get((U8*)&p->address.sin_port, 2);
+			pBuf->Get((U8*)&p->address.sin_addr, 4);
+			pBuf->Get((U8*)&p->address.sin_zero, 8);
 			}
 			break;
 
 		default:
-			TRACE("PutSocketAddress(): Unknown protocol!\n");
+			TRACE("GetSocketAddress(): Unknown protocol!\n");
 			break;
 		}
 	}
@@ -135,17 +139,19 @@ inline void PutSocketAddress(
 	{
 	// The RSocket::Address is a bit tricky, and different for each protocol
 	pBuf->Put((int32_t)paddress->prototype);
-	pBuf->Put(paddress->lAddressLen);
+	int32_t lWireAddrLen = (paddress->prototype == RSocket::TCPIP) ? 16 : paddress->lAddressLen;
+	pBuf->Put(lWireAddrLen);
 	switch(paddress->prototype)
 		{
 		case RSocket::TCPIP:
-				{
+			{
 			RProtocolBSDIP::AddressIP* p = (RProtocolBSDIP::AddressIP*)paddress;
-			pBuf->Put(p->address.sin_family);
+			U16 u16Family = (U16)p->address.sin_family;
+			pBuf->Put(u16Family);
 			// Don't let these byte-swap!!!  They are always in network order on all systems!
-			pBuf->Put((U8*)&p->address.sin_port, sizeof(p->address.sin_port));
-			pBuf->Put((U8*)&p->address.sin_addr, sizeof(p->address.sin_addr));
-			pBuf->Put((U8*)&p->address.sin_zero, sizeof(p->address.sin_zero));
+			pBuf->Put((U8*)&p->address.sin_port, 2);
+			pBuf->Put((U8*)&p->address.sin_addr, 4);
+			pBuf->Put((U8*)&p->address.sin_zero, 8);
 			}
 			break;
 
@@ -309,7 +315,7 @@ class NetMsg
 
 		typedef struct Stat
 			{
-			enum { Size = 1 + sizeof(Status) };
+			enum { Size = 1 + 4 };
 			uint8_t	ucType;								// Message type
 			Status			status;								// status value
 
@@ -328,7 +334,7 @@ class NetMsg
 
 		typedef struct Err
 			{
-			enum { Size = 1 + sizeof(Error) + sizeof(uint32_t) };
+			enum { Size = 1 + 4 + 4 };
 			uint8_t	ucType;								// Message type
 			Error				error;								// error value
 			uint32_t				ulParam;								// Miscellaneous param for errors.
@@ -501,7 +507,7 @@ class NetMsg
 		// server tells client about another client (or about itself!)
 		typedef struct Joined
 			{
-			enum { Size = 1 + 1 + sizeof(RSocket::Address) + Net::MaxPlayerNameSize + 1 + 1 + 2 };
+			enum { Size = 1 + 1 + 24 + Net::MaxPlayerNameSize + 1 + 1 + 2 };
 
 			uint8_t	ucType;								// Message type
 			Net::ID id;												// ID
@@ -734,16 +740,20 @@ class NetMsg
 				pBuf->Get(&pmsg->msg.inputData.sNum);
 				
 				// Allocate buffer for variable-sized data
-				pmsg->msg.inputData.pInputs = (UINPUT*)AllocVar(pmsg, (int32_t)pmsg->msg.inputData.sNum * sizeof(UINPUT));
+				int32_t lCount = (int32_t)pmsg->msg.inputData.sNum;
+				pmsg->msg.inputData.pInputs = (UINPUT*)AllocVar(pmsg, lCount * (sizeof(UINPUT) + sizeof(U8)));
+				pmsg->msg.inputData.pFrameTimes = (U8*)(pmsg->msg.inputData.pInputs + lCount);
 
 				// Get the variable-sized data
-				pBuf->Get(pmsg->msg.inputData.pInputs, (int32_t)(pmsg->msg.inputData.sNum));
+				pBuf->Get(pmsg->msg.inputData.pInputs, lCount);
+				pBuf->Get(pmsg->msg.inputData.pFrameTimes, lCount);
 				}
 
 			static void Write(NetMsg* pmsg, CBufQ* pBuf)
 				{
 				// Calculate message size
-				pmsg->msg.inputData.lSize = 1 + 4 + 1 + sizeof(Net::SEQ) + 2 + ((int32_t)(pmsg->msg.inputData.sNum) * sizeof(UINPUT));
+				int32_t lCount = (int32_t)(pmsg->msg.inputData.sNum);
+				pmsg->msg.inputData.lSize = 1 + 4 + 1 + sizeof(Net::SEQ) + 2 + (lCount * (sizeof(UINPUT) + sizeof(U8)));
 
 				// Write message
 				pBuf->Put(&pmsg->msg.inputData.ucType);
@@ -751,7 +761,8 @@ class NetMsg
 				pBuf->Put(&pmsg->msg.inputData.id);
 				pBuf->Put(&pmsg->msg.inputData.seqStart);
 				pBuf->Put(&pmsg->msg.inputData.sNum);
-				pBuf->Put(pmsg->msg.inputData.pInputs, (int32_t)(pmsg->msg.inputData.sNum));
+				pBuf->Put(pmsg->msg.inputData.pInputs, lCount);
+				pBuf->Put(pmsg->msg.inputData.pFrameTimes, lCount);
 				}
 			} InputData;
 
@@ -1291,7 +1302,7 @@ class CNetMsgr
 		typedef struct
 			{
 			uint8_t				ucType;								// Type (used only for debug ASSERTs)
-			size_t			size;									// Size of data to read/write (bytes)
+			int32_t			size;									// Size of data to read/write (bytes)
 			FUNC_READ		funcRead;							// Pointer to read function
 			FUNC_WRITE		funcWrite;							// Pointer to write function
 			} InfoMsg;
@@ -1493,6 +1504,25 @@ class CNetMsgr
 			return m_address;
 			}
 
+		bool GetLocalAddress(RSocket::Address* paddress)
+			{
+			if (m_state == Connected && m_socket.m_pProtocol && RSocket::GetProtoType() == RSocket::TCPIP)
+				{
+				RProtocolBSDIP* pProto = (RProtocolBSDIP*)m_socket.m_pProtocol;
+				RProtocolBSDIP::AddressIP* pIp = (RProtocolBSDIP::AddressIP*)paddress;
+				SOCKLEN sockLen = (SOCKLEN)sizeof(pIp->address);
+				memset(pIp, 0, sizeof(*pIp));
+				if (getsockname(pProto->m_sock, (SOCKADDR*)&pIp->address, &sockLen) == 0 &&
+					pIp->address.sin_family == AF_INET)
+					{
+					pIp->prototype = RSocket::TCPIP;
+					pIp->lAddressLen = (int32_t)sizeof(SOCKADDR_IN);
+					return true;
+					}
+				}
+			return false;
+			}
+
 		////////////////////////////////////////////////////////////////////////////////
 		// Determine the time of the most-recently received or sent message
 		////////////////////////////////////////////////////////////////////////////////
@@ -1540,6 +1570,18 @@ class CNetMsgr
 			}
 	};
 
+
+
+static_assert(sizeof(RSocket::Address) == 24, "RSocket::Address wire size must be 24 bytes");
+static_assert(sizeof(UINPUT) == 8, "UINPUT wire size must be 8 bytes");
+static_assert(sizeof(Net::SEQ) == 2, "Net::SEQ wire size must be 2 bytes");
+static_assert(sizeof(Net::ID) == 1, "Net::ID wire size must be 1 byte");
+static_assert(NetMsg::Login::Size == 9, "NetMsg::Login wire size mismatch");
+static_assert(NetMsg::LoginAccept::Size == 10, "NetMsg::LoginAccept wire size mismatch");
+static_assert(NetMsg::JoinReq::Size == 37, "NetMsg::JoinReq wire size mismatch");
+static_assert(NetMsg::Joined::Size == 62, "NetMsg::Joined wire size mismatch");
+static_assert(NetMsg::SetupGame::Size == 47, "NetMsg::SetupGame wire size mismatch");
+static_assert(NetMsg::StartGame::Size == 52, "NetMsg::StartGame wire size mismatch");
 
 #endif //NETMSGR_H
 ////////////////////////////////////////////////////////////////////////////////

@@ -119,7 +119,33 @@ extern void Key_Event(SDL_Event *event)
 	        PRSP_SK_EVENT	pkeEvent	= ms_akeEvents + INC_N_WRAP(sEventIndex, MAX_EVENTS);
     	    // Fill event.
     	    pkeEvent->lTime	= SDL_GetTicks();
+        	if ((gkey == 0) && (event->key.keysym.mod & KMOD_SHIFT))
+        	{
+        	    switch (key)
+        	    {
+        	        case '-': key = '_'; break;
+        	        case '=': key = '+'; break;
+        	        case ';': key = ':'; break;
+        	        case '\'': key = '"'; break;
+        	        case ',': key = '<'; break;
+        	        case '.': key = '>'; break;
+        	        case '/': key = '?'; break;
+        	        case '1': key = '!'; break;
+        	        case '2': key = '@'; break;
+        	        case '3': key = '#'; break;
+        	        case '4': key = '$'; break;
+        	        case '5': key = '%'; break;
+        	        case '6': key = '^'; break;
+        	        case '7': key = '&'; break;
+        	        case '8': key = '*'; break;
+        	        case '9': key = '('; break;
+        	        case '0': key = ')'; break;
+        	        default: break;
+        	    }
+        	}
         	pkeEvent->lKey = ((gkey) ? gkey : key);
+        	if (event->key.keysym.mod & KMOD_SHIFT)
+        	    pkeEvent->lKey |= RSP_GKF_SHIFT;
 
     	    // Enqueue event . . .
 	    	if (ms_qkeEvents.EnQ(pkeEvent) == 0)

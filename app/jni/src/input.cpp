@@ -201,9 +201,14 @@ static std::atomic<float> g_fTwinMoveY(0.0f);
 static std::atomic<float> g_fTwinAimX(0.0f);
 static std::atomic<float> g_fTwinAimY(0.0f);
 static std::atomic<bool>  g_bTwinForceFire(false);
+// True while a multiplayer realm runs: CDude must NOT read local Android sticks
+// (Bjoy.cpp GetDudeVelocity/GetDudeFireAngle); all control goes through UInput.
+static std::atomic<bool>  g_bTwinMP(false);
 
 bool AndroidGetTwinStickMove(double* d_Velocity, double* d_Angle)
 {
+	if (g_bTwinMP.load(std::memory_order_relaxed))
+		return false;
 	const float mx = g_fTwinMoveX.load(std::memory_order_relaxed);
 	const float my = g_fTwinMoveY.load(std::memory_order_relaxed);
 	const float mag = hypotf(mx, my);
@@ -221,6 +226,8 @@ bool AndroidGetTwinStickMove(double* d_Velocity, double* d_Angle)
 
 bool AndroidGetTwinStickAim(double* d_Angle)
 {
+	if (g_bTwinMP.load(std::memory_order_relaxed))
+		return false;
 	const float ax = g_fTwinAimX.load(std::memory_order_relaxed);
 	const float ay = g_fTwinAimY.load(std::memory_order_relaxed);
 	const float mag = hypotf(ax, ay);
@@ -1377,72 +1384,112 @@ extern UINPUT GetLocalInput(				// Returns local input.
 
 			const float moveMag = hypotf(moveX, moveY);
 			const float aimMag  = hypotf(aimX, aimY);
+			const bool bUseMPInput = isMP || (prealm != NULL && prealm->m_flags.bMultiplayer);
+			g_bTwinMP.store(bUseMPInput, std::memory_order_relaxed);
 
-			if (moveMag > 0.2f)
+			if (!bUseMPInput)
 			{
-				// Clear discrete 4/8-way directional bits so 360-degree twin-stick movement has full analog angle precision
-				input &= ~(INPUT_FORWARD | INPUT_BACKWARD | INPUT_LEFT | INPUT_RIGHT |
-				           INPUT_MOVE_UP | INPUT_MOVE_DOWN | INPUT_MOVE_LEFT | INPUT_MOVE_RIGHT);
-
-				if (moveMag < 0.42f)
-					input &= ~INPUT_RUN;
-				else
-					input |= INPUT_RUN;
-
-#if defined(ALLOW_TWINSTICK)
-				// Keep UInput rotation delta neutral (INPUT_IDLE = 360 -> 0 deg delta);
-				// GetDudeVelocity() passes the exact 360-degree move angle to CDude.
-				input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)INPUT_IDLE;
-#else
-				double moveAngle = atan2((double)-moveY, (double)moveX) * 180.0 / M_PI;
-				if (moveAngle < 0.0)
-					moveAngle += 360.0;
-				CDude* pdude = NULL;
-				if (prealm->m_idbank.GetThingByID((CThing**)&pdude, idLocalDude) == 0 && pdude != NULL)
+				// ---- SINGLE PLAYER: identical to stable de48ed8 (ALLOW_TWINSTICK) ----
+				if (moveMag > 0.2f)
 				{
-					int16_t curRot = (int16_t)pdude->m_dRot;
-					rspMod360(&curRot);
-					int16_t diff = (int16_t)lround(moveAngle) - curRot;
-					if (diff > 180) diff -= 360;
-					else if (diff < -180) diff += 360;
-					int16_t deltaEnc = 360 + diff;
-					if (deltaEnc < 0) deltaEnc = 0;
-					else if (deltaEnc > 720) deltaEnc = 720;
-					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)deltaEnc;
+					input &= ~(INPUT_FORWARD | INPUT_BACKWARD | INPUT_LEFT | INPUT_RIGHT |
+					           INPUT_MOVE_UP | INPUT_MOVE_DOWN | INPUT_MOVE_LEFT | INPUT_MOVE_RIGHT);
+					if (moveMag < 0.42f)
+						input &= ~INPUT_RUN;
+					else
+						input |= INPUT_RUN;
+					// Neutral rotation delta; CDude reads the exact angle via GetDudeVelocity().
+					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)INPUT_IDLE;
 				}
-				input |= INPUT_FORWARD;
-#endif
+				if (aimMag > 0.2f)
+				{
+					input &= ~(INPUT_FIRE_UP | INPUT_FIRE_DOWN | INPUT_FIRE_LEFT | INPUT_FIRE_RIGHT);
+					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)INPUT_IDLE;
+				}
 			}
-
-			if (aimMag > 0.2f)
+			else
 			{
-				double aimAngle = atan2((double)-aimY, (double)aimX) * 180.0 / M_PI;
-				if (aimAngle < 0.0)
-					aimAngle += 360.0;
-				if (aimAngle >= 360.0)
-					aimAngle -= 360.0;
+				// ---- MULTIPLAYER: only standard UInput bits (identical on PC and Android) ----
+				// The 360-degree stick angle is sent as a relative rotation delta
+				// (0..720 in INPUT_ROT_MASK, 360 = no change), exactly as the original
+				// mouse code does. s_sCmdRot tracks the angle we have commanded so far,
+				// so every delta is computed deterministically regardless of net latency.
+				static int s_sCmdRot = -1;
 
-				input &= ~(INPUT_FIRE_UP | INPUT_FIRE_DOWN | INPUT_FIRE_LEFT | INPUT_FIRE_RIGHT);
+				const bool bMove = (moveMag > 0.2f);
+				const bool bAim  = (aimMag > 0.2f);
 
-#if defined(ALLOW_TWINSTICK)
-				// GetDudeFireAngle() sets CDude::m_dRot to exact 360-degree aimAngle before ArmWeapon();
-				// set UInput rotation delta to INPUT_IDLE (360) so m_dRot is not double-rotated.
-				input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)INPUT_IDLE;
-#else
-				CDude* pdude = NULL;
-				if (prealm->m_idbank.GetThingByID((CThing**)&pdude, idLocalDude) == 0 && pdude != NULL)
+				if (bMove || bAim)
 				{
-					int16_t curRot = (int16_t)pdude->m_dRot;
-					rspMod360(&curRot);
-					int16_t diff = (int16_t)lround(aimAngle) - curRot;
-					if (diff > 180) diff -= 360;
-					else if (diff < -180) diff += 360;
-					int16_t deltaEnc = 360 + diff;
-					if (deltaEnc < 0) deltaEnc = 0;
-					else if (deltaEnc > 720) deltaEnc = 720;
-					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)deltaEnc;
+					double moveAngle = atan2((double)-moveY, (double)moveX) * 180.0 / M_PI;
+					if (moveAngle < 0.0) moveAngle += 360.0;
+					double aimAngle = atan2((double)-aimY, (double)aimX) * 180.0 / M_PI;
+					if (aimAngle < 0.0) aimAngle += 360.0;
+
+					int target = (int)lround(bAim ? aimAngle : moveAngle) % 360;
+					if (target < 0) target += 360;
+
+					if (s_sCmdRot < 0)
+					{
+						CDude* pdude = NULL;
+						if (prealm != NULL && prealm->m_idbank.GetThingByID((CThing**)&pdude, idLocalDude) == 0 && pdude != NULL)
+						{
+							int cur = (int)lround(pdude->m_dRot) % 360;
+							if (cur < 0) cur += 360;
+							s_sCmdRot = cur;
+						}
+						else
+							s_sCmdRot = target;
+					}
+
+					int diff = target - s_sCmdRot;
+					while (diff > 180) diff -= 360;
+					while (diff < -180) diff += 360;
+					s_sCmdRot = target;
+
+					input &= ~(INPUT_FORWARD | INPUT_BACKWARD | INPUT_LEFT | INPUT_RIGHT | INPUT_STRAFE |
+					           INPUT_MOVE_UP | INPUT_MOVE_DOWN | INPUT_MOVE_LEFT | INPUT_MOVE_RIGHT |
+					           INPUT_FIRE_UP | INPUT_FIRE_DOWN | INPUT_FIRE_LEFT | INPUT_FIRE_RIGHT);
+					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)(360 + diff);
+
+					if (bMove)
+					{
+						if (moveMag < 0.42f)
+							input &= ~INPUT_RUN;
+						else
+							input |= INPUT_RUN;
+
+						// Always set the standard 8-directional INPUT_MOVE_* bits (bits 32..35)
+						// so the Steam PC build (where m_sUseNewMouse == TRUE strips INPUT_FORWARD)
+						// moves the character identically to Android.
+						int sector = ((int)floor(moveAngle / 45.0 + 0.5)) & 7;
+						switch (sector)
+						{
+							case 0: input |= INPUT_MOVE_RIGHT; break;
+							case 1: input |= INPUT_MOVE_UP | INPUT_MOVE_RIGHT; break;
+							case 2: input |= INPUT_MOVE_UP; break;
+							case 3: input |= INPUT_MOVE_UP | INPUT_MOVE_LEFT; break;
+							case 4: input |= INPUT_MOVE_LEFT; break;
+							case 5: input |= INPUT_MOVE_DOWN | INPUT_MOVE_LEFT; break;
+							case 6: input |= INPUT_MOVE_DOWN; break;
+							default: input |= INPUT_MOVE_DOWN | INPUT_MOVE_RIGHT; break;
+						}
+					}
 				}
-#endif
+				else
+				{
+					// Sticks released: re-sync tracker with the real dude angle next time.
+					s_sCmdRot = -1;
+					input = (input & ~((UINPUT)INPUT_ROT_MASK)) | (U32)INPUT_IDLE;
+				}
+
+				// Suicide on a dead dude must also act as REVIVE (respawn) via the network.
+				if (input & INPUT_SUICIDE)
+				{
+					CDude* pdude = NULL;
+					if (prealm != NULL && prealm->m_idbank.GetThingByID((CThing**)&pdude, idLocalDude) == 0 && pdude != NULL && pdude->IsDead())
+						input |= INPUT_REVIVE;
+				}
 			}
 
 			if (isFiring || aimMag > 0.78f)

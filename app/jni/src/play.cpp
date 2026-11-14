@@ -334,6 +334,9 @@
 #define PLAY_CPP
 
 #include "RSPiX.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "main.h"
 #include "input.h"
 #include "game.h"
@@ -1931,7 +1934,16 @@ class CPlayNet : public CPlay
 
 						// Copy inputs into the input module
 						for (Net::ID id = 0; id < Net::MaxNumIDs; id++)
+						{
 							SetInput(id, aInputs[id]);
+#ifdef __ANDROID__
+							// Log network UInput of every player (only when it changes, to avoid flooding logcat).
+							static UINPUT s_aLastLogged[Net::MaxNumIDs];
+							if (aInputs[id] != 0 && aInputs[id] != s_aLastLogged[id])
+								__android_log_print(ANDROID_LOG_INFO, "POSTAL_NET", "Player %d UInput = 0x%016llX (dec: %llu)", (int)id, (unsigned long long)aInputs[id], (unsigned long long)aInputs[id]);
+							s_aLastLogged[id] = aInputs[id];
+#endif
+						}
 
 						// Set flag so we'll do the frame
 						pinfo->m_bDoRealmFrame = true;
@@ -2080,7 +2092,16 @@ class CPlayNet : public CPlay
 					if (pclient->IsLocalInputNeeded())
 						{
 						if (!pinfo->m_bInMenu && !pinfo->m_bChatting)
-							pclient->SetLocalInput(GetLocalInput(pinfo->Realm(), pinfo->Camera(), pinfo->m_idLocalDude, NULL, bRealMP) );
+							{
+							UINPUT uLocal = GetLocalInput(pinfo->Realm(), pinfo->Camera(), pinfo->m_idLocalDude, NULL, bRealMP);
+#ifdef __ANDROID__
+							static UINPUT s_uLastSent = 0;
+							if (uLocal != 0 && uLocal != s_uLastSent)
+								__android_log_print(ANDROID_LOG_INFO, "POSTAL_NET", "LOCAL SEND UInput = 0x%016llX (dec: %llu)", (unsigned long long)uLocal, (unsigned long long)uLocal);
+							s_uLastSent = uLocal;
+#endif
+							pclient->SetLocalInput(uLocal);
+						}
 						else
 							pclient->SetLocalInput(INPUT_IDLE);
 						}

@@ -757,6 +757,42 @@ void CNetServer::SendMsg(
 	{
 	ASSERT(id != Net::InvalidID);
 	ASSERT(id < Net::MaxNumIDs);
+
+	// When advertising the host's local client (or any loopback-bound client) to a remote client,
+	// substitute the exact local IPv4 interface address of that remote client's accepted TCP socket
+	// so multi-homed / VPN / Hotspot hosts always advertise a reachable LAN peer IP.
+	if (pmsg->msg.nothing.ucType == NetMsg::JOINED &&
+		pmsg->msg.joined.id != id &&
+		pmsg->msg.joined.address.prototype == RSocket::TCPIP)
+		{
+		Net::ID idAbout = pmsg->msg.joined.id;
+		const RProtocolBSDIP::AddressIP* pAboutIp = (const RProtocolBSDIP::AddressIP*)&pmsg->msg.joined.address;
+		U32 u32About = ntohl(pAboutIp->address.sin_addr.s_addr);
+		bool bIsHostLocal = (idAbout == m_idLocalClient) || (m_idLocalClient == Net::InvalidID && idAbout == 0);
+		bool bIsLoopbackOrAny = (u32About == 0) || ((u32About >> 24) == 127);
+
+		if (bIsHostLocal || bIsLoopbackOrAny)
+			{
+			RSocket::Address addrLocalIf;
+			if (m_aClients[id].m_msgr.GetLocalAddress(&addrLocalIf))
+				{
+				const RProtocolBSDIP::AddressIP* pLocalIp = (const RProtocolBSDIP::AddressIP*)&addrLocalIf;
+				U32 u32Local = ntohl(pLocalIp->address.sin_addr.s_addr);
+				if (u32Local != 0 && (u32Local >> 24) != 127 &&
+					pLocalIp->address.sin_addr.s_addr != pAboutIp->address.sin_addr.s_addr)
+					{
+					NetMsg msgFixed = *pmsg;
+					RProtocolBSDIP::AddressIP* pFixedIp = (RProtocolBSDIP::AddressIP*)&msgFixed.msg.joined.address;
+					pFixedIp->address.sin_addr = pLocalIp->address.sin_addr;
+					pFixedIp->address.sin_family = AF_INET;
+					pFixedIp->lAddressLen = (int32_t)sizeof(SOCKADDR_IN);
+					m_aClients[id].m_msgr.SendMsg(&msgFixed);
+					return;
+					}
+				}
+			}
+		}
+
 	m_aClients[id].m_msgr.SendMsg(pmsg);
 	}
 

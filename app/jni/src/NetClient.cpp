@@ -100,7 +100,67 @@
 
 // This is the maximum size of the peer messages.
 #define PEER_MSG_HEADER_SIZE		(1 + 2 + 2 + 2 + 2)
-#define PEER_MSG_MAX_SIZE		  (PEER_MSG_HEADER_SIZE + ((Net::MaxAheadSeq * 2) * (sizeof(UINPUT) + sizeof(U8)))) // *SPA
+#define PEER_MSG_MAX_INPUTS			(Net::MaxAheadSeq * 2)
+#define PEER_MSG_MAX_SIZE		  (PEER_MSG_HEADER_SIZE + (PEER_MSG_MAX_INPUTS * (sizeof(UINPUT) + sizeof(U8)))) // *SPA
+// Larger receive buffer so if a 32-bit PC sends (MaxAheadSeq*2 + 2) frames (e.g. 61..62 inputs = 558..567 bytes),
+// we never drop or truncate the UDP packet on Android.
+#define PEER_MSG_RECV_BUF_SIZE	  (PEER_MSG_HEADER_SIZE + ((PEER_MSG_MAX_INPUTS + 8) * (sizeof(UINPUT) + sizeof(U8))))
+
+static bool s_bLoggedFirstPeerSend = false;
+static bool s_bLoggedFirstPeerRecv = false;
+
+// When a multi-homed PC (e.g. with Radmin VPN / Hamachi / WSL / VirtualBox) hosts a LAN game,
+// its self-browse broadcast often binds its local client (idServer / id 0) to the virtual VPN IP
+// (such as 26.x.x.x or 127.0.0.1) instead of the Wi-Fi/LAN IP that remote clients TCP-connected to.
+// Rewrite the host peer's IP to m_addressServer's IP while preserving its peer UDP port!
+static void FixupHostPeerAddress(
+	Net::ID idPeer,
+	RSocket::Address* pPeerAddress,
+	const RSocket::Address* pServerAddress,
+	bool bForceServerMatch)
+	{
+	if (pPeerAddress->prototype != RSocket::TCPIP || pServerAddress->prototype != RSocket::TCPIP)
+		return;
+
+	RProtocolBSDIP::AddressIP* pPeerIp = (RProtocolBSDIP::AddressIP*)pPeerAddress;
+	const RProtocolBSDIP::AddressIP* pSrvIp = (const RProtocolBSDIP::AddressIP*)pServerAddress;
+
+	U32 u32PeerHostOrder = ntohl(pPeerIp->address.sin_addr.s_addr);
+	U32 u32SrvHostOrder  = ntohl(pSrvIp->address.sin_addr.s_addr);
+
+	if (u32SrvHostOrder == 0 || (u32SrvHostOrder >> 24) == 127)
+		return;
+
+	bool bIsLoopbackOrZero = (u32PeerHostOrder == 0) || ((u32PeerHostOrder >> 24) == 127);
+	bool bDifferentSubnetHost0 = (idPeer == 0) && ((u32PeerHostOrder & 0xFFFFFF00U) != (u32SrvHostOrder & 0xFFFFFF00U));
+
+	if (bForceServerMatch || bIsLoopbackOrZero || bDifferentSubnetHost0)
+		{
+		if (pPeerIp->address.sin_addr.s_addr != pSrvIp->address.sin_addr.s_addr)
+			{
+			U16 u16Port = ntohs(pPeerIp->address.sin_port);
+			if (u16Port == 0)
+				{
+				u16Port = (U16)(ntohs(pSrvIp->address.sin_port) + Net::FirstPeerPortOffset + idPeer);
+				pPeerIp->address.sin_port = htons(u16Port);
+				}
+			SDL_Log("[PostalNet] Rewrote peer %d UDP IP %u.%u.%u.%u -> server LAN IP %u.%u.%u.%u:%u",
+				(int)idPeer,
+				(unsigned)((u32PeerHostOrder >> 24) & 0xFF),
+				(unsigned)((u32PeerHostOrder >> 16) & 0xFF),
+				(unsigned)((u32PeerHostOrder >> 8) & 0xFF),
+				(unsigned)(u32PeerHostOrder & 0xFF),
+				(unsigned)((u32SrvHostOrder >> 24) & 0xFF),
+				(unsigned)((u32SrvHostOrder >> 16) & 0xFF),
+				(unsigned)((u32SrvHostOrder >> 8) & 0xFF),
+				(unsigned)(u32SrvHostOrder & 0xFF),
+				(unsigned)u16Port);
+			pPeerIp->address.sin_addr = pSrvIp->address.sin_addr;
+			pPeerIp->address.sin_family = AF_INET;
+			pPeerIp->lAddressLen = (int32_t)sizeof(SOCKADDR_IN);
+			}
+		}
+	}
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -709,6 +769,20 @@ void CNetClient::GetMsg(
 
 					// Save this peer's info
 					m_aPeers[id].m_address = pmsg->msg.joined.address;
+					if (id != m_id)
+						{
+						FixupHostPeerAddress(id, &m_aPeers[id].m_address, &m_addressServer, (id == m_idServer));
+						pmsg->msg.joined.address = m_aPeers[id].m_address;
+						}
+					{
+					const RProtocolBSDIP::AddressIP* pLogIp = (const RProtocolBSDIP::AddressIP*)&m_aPeers[id].m_address;
+					U32 u32Ip = ntohl(pLogIp->address.sin_addr.s_addr);
+					SDL_Log("[PostalNet] JOINED id=%d (myId=%d) name='%s' peer=%u.%u.%u.%u:%u",
+						(int)id, (int)m_id, pmsg->msg.joined.acName,
+						(unsigned)((u32Ip >> 24) & 0xFF), (unsigned)((u32Ip >> 16) & 0xFF),
+						(unsigned)((u32Ip >> 8) & 0xFF), (unsigned)(u32Ip & 0xFF),
+						(unsigned)ntohs(pLogIp->address.sin_port));
+					}
 					memcpy(m_aPeers[id].m_acName, pmsg->msg.joined.acName, sizeof(m_aPeers[id].m_acName));
 					m_aPeers[id].m_ucColor = pmsg->msg.joined.ucColor;
 					m_aPeers[id].m_ucTeam = pmsg->msg.joined.ucTeam;
@@ -819,8 +893,9 @@ void CNetClient::GetMsg(
 					msg.msg.inputData.id			= id;
 					msg.msg.inputData.seqStart	= pmsg->msg.inputReq.seqStart;
 					msg.msg.inputData.sNum		= pmsg->msg.inputReq.sNum;
-					msg.msg.inputData.pInputs	= (UINPUT*)msg.AllocVar((int32_t)pmsg->msg.inputReq.sNum * sizeof(UINPUT));
-					msg.msg.inputData.pFrameTimes	= (U8*)msg.AllocVar((int32_t)pmsg->msg.inputReq.sNum * sizeof(U8));
+					int32_t lCount = (int32_t)pmsg->msg.inputReq.sNum;
+					msg.msg.inputData.pInputs	= (UINPUT*)msg.AllocVar(lCount * (sizeof(UINPUT) + sizeof(U8)));
+					msg.msg.inputData.pFrameTimes	= (U8*)(msg.msg.inputData.pInputs + lCount);
 					
 					// Copy the requested values into the allocated memory
 					Net::SEQ seq = msg.msg.inputData.seqStart;
@@ -904,6 +979,15 @@ void CNetClient::GetMsg(
 					m_lFrameTime = (int32_t)pmsg->msg.startGame.sFrameTime;
 					m_seqMaxAhead = pmsg->msg.startGame.seqMaxAhead;
 					m_seqInputNotYetSent = m_seqMaxAhead + 1; // *SPA
+					if (m_idServer < Net::MaxNumIDs && m_idServer != m_id && m_aPeers[m_idServer].m_state == CPeer::Joined)
+						{
+						FixupHostPeerAddress(m_idServer, &m_aPeers[m_idServer].m_address, &m_addressServer, true);
+						}
+					SDL_Log("[PostalNet] START_GAME: myId=%d serverId=%d realmNum=%d realmFile='%s' coopLevels=%d coopMode=%d frameTime=%d maxAhead=%u",
+						(int)m_id, (int)m_idServer, (int)pmsg->msg.startGame.sRealmNum,
+						pmsg->msg.startGame.acRealmFile, (int)pmsg->msg.startGame.sCoopLevels,
+						(int)pmsg->msg.startGame.sCoopMode, (int)pmsg->msg.startGame.sFrameTime,
+						(unsigned)pmsg->msg.startGame.seqMaxAhead);
 
 					// Game started, but we always start out "not playing"
 					m_bGameStarted = true;
@@ -921,6 +1005,9 @@ void CNetClient::GetMsg(
 
 				case NetMsg::START_REALM:
 					{
+					s_bLoggedFirstPeerSend = false;
+					s_bLoggedFirstPeerRecv = false;
+					SDL_Log("[PostalNet] START_REALM received! Entering UDP peer lockstep (myId=%d, joined=%d).", (int)m_id, (int)m_sNumJoined);
 					// Start playing
 					m_bPlaying = true;
 					// *SPA 12/30/97 We can send the first frame now
@@ -1169,13 +1256,14 @@ void CNetClient::ReceiveFromPeers(void)
 		// Get next datagram, If we get a too-large datagram, an error occurs and
 		// and the unreceived portion is automatically discarded.  Such a message
 		// could come from a foreign app that is using the same port as us.
-		U8 msg[PEER_MSG_MAX_SIZE];
+		U8 msg[PEER_MSG_RECV_BUF_SIZE];
 		int32_t lReceived;
-		int16_t serr = m_socketPeers.ReceiveFrom(msg, sizeof(msg), &lReceived, NULL);
+		RSocket::Address addrSrc;
+		int16_t serr = m_socketPeers.ReceiveFrom(msg, sizeof(msg), &lReceived, &addrSrc);
 		if (serr == 0)
 			{
 			// Make sure size is within proper range
-			if ((lReceived >= PEER_MSG_HEADER_SIZE) && (lReceived <= PEER_MSG_MAX_SIZE))
+			if ((lReceived >= PEER_MSG_HEADER_SIZE) && (lReceived <= PEER_MSG_RECV_BUF_SIZE))
 				{
 
 				// Get the id from the message
@@ -1189,6 +1277,32 @@ void CNetClient::ReceiveFromPeers(void)
 					// Make sure peer is joined (could be an old message from a dropped peer)
 					if (m_aPeers[id].m_state == CPeer::Joined)
 						{
+						// Learn/update actual reachable UDP source IP:port for remote peers (multi-NIC / NAT safety)
+						if (id != m_id && addrSrc.prototype == RSocket::TCPIP)
+							{
+							RProtocolBSDIP::AddressIP* pPeerIp = (RProtocolBSDIP::AddressIP*)&m_aPeers[id].m_address;
+							const RProtocolBSDIP::AddressIP* pSrcIp = (const RProtocolBSDIP::AddressIP*)&addrSrc;
+							if (pSrcIp->address.sin_addr.s_addr != 0 &&
+								(pPeerIp->address.sin_addr.s_addr != pSrcIp->address.sin_addr.s_addr ||
+								 pPeerIp->address.sin_port != pSrcIp->address.sin_port))
+								{
+								U32 u32Src = ntohl(pSrcIp->address.sin_addr.s_addr);
+								SDL_Log("[PostalNet] Learned actual UDP source for peer %d: %u.%u.%u.%u:%u",
+									(int)id,
+									(unsigned)((u32Src >> 24) & 0xFF), (unsigned)((u32Src >> 16) & 0xFF),
+									(unsigned)((u32Src >> 8) & 0xFF), (unsigned)(u32Src & 0xFF),
+									(unsigned)ntohs(pSrcIp->address.sin_port));
+								pPeerIp->address.sin_addr = pSrcIp->address.sin_addr;
+								pPeerIp->address.sin_port = pSrcIp->address.sin_port;
+								pPeerIp->address.sin_family = AF_INET;
+								pPeerIp->lAddressLen = (int32_t)sizeof(SOCKADDR_IN);
+								}
+							}
+						if (!s_bLoggedFirstPeerRecv)
+							{
+							s_bLoggedFirstPeerRecv = true;
+							SDL_Log("[PostalNet] First UDP peer packet received from peer %d (%d bytes).", (int)id, (int)lReceived);
+							}
 						// Calculate the number of input values the message contains. *SPA add sizeof frame time
 						int32_t lNumInputs = (lReceived - PEER_MSG_HEADER_SIZE) / (sizeof(UINPUT) + sizeof(U8));
 
@@ -1375,16 +1489,19 @@ void CNetClient::SendToPeer(Net::ID id,				// id of peer to send to
 	// we already determined the one he needs is available (see above).
 	UINPUT input;
 	U8 frameTime; // *SPA
-	int16_t s;
-	for (s = seqStart; s < m_seqInputNotYetSent; s++)
+	Net::SEQ seq = seqStart;
+	uint16_t u16SentInputs = 0;
+	while ((seq != m_seqInputNotYetSent) && (u16SentInputs < PEER_MSG_MAX_INPUTS))
 		{
-		input = m_netinput.Get(s);
+		input = m_netinput.Get(seq);
 		// Send game time for this frame *SPA
-		frameTime = m_netinput.GetFrameTime(s);
+		frameTime = m_netinput.GetFrameTime(seq);
 		if (input != CNetInput::Invalid)
 			{
 			Put(pput, input);
 			Put(pput, frameTime); // *SPA
+			seq++;
+			u16SentInputs++;
 			}
 		else
 			break;
@@ -1432,6 +1549,17 @@ void CNetClient::SendToPeer(Net::ID id,				// id of peer to send to
 	int16_t serr = m_socketPeers.SendTo(msg, lSize, &lSent, &m_aPeers[id].m_address);
 	if (serr == 0)
 		{
+		if (!s_bLoggedFirstPeerSend)
+			{
+			s_bLoggedFirstPeerSend = true;
+			const RProtocolBSDIP::AddressIP* pDstIp = (const RProtocolBSDIP::AddressIP*)&m_aPeers[id].m_address;
+			U32 u32Dst = ntohl(pDstIp->address.sin_addr.s_addr);
+			SDL_Log("[PostalNet] First UDP peer packet sent to peer %d (%u.%u.%u.%u:%u, %d bytes, %u inputs).",
+				(int)id,
+				(unsigned)((u32Dst >> 24) & 0xFF), (unsigned)((u32Dst >> 16) & 0xFF),
+				(unsigned)((u32Dst >> 8) & 0xFF), (unsigned)(u32Dst & 0xFF),
+				(unsigned)ntohs(pDstIp->address.sin_port), (int)lSize, (unsigned)u16SentInputs);
+			}
 		if (lSent != lSize)
 			TRACE("Error sending message to peer -- should have sent %ld bytes but actually sent %ld.\n", (int32_t)lSize, (int32_t)lSent);
 		}

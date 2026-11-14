@@ -227,7 +227,8 @@ inline void MySeedRandom(int32_t seed)
 
 inline int32_t MyRandom(void)
 	{
-	return (((ms_lRandom = ms_lRandom * 214013L + 2531011L) >> 16) & 0x7fff);
+	ms_lRandom = (int32_t)((uint32_t)ms_lRandom * 214013U + 2531011U);
+	return ((ms_lRandom >> 16) & 0x7fff);
 	}
 
 

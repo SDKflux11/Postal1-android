@@ -39,8 +39,11 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <sys/uio.h>
 #include <sys/ioctl.h>
@@ -49,18 +52,12 @@
 #include <pthread.h>
 #include <fcntl.h>
 
-// WinSock will define these, but BSD sockets don't...
-#if 0 //PLATFORM_MACOSX
-typedef int socklen_t;
-#endif
-
 typedef struct sockaddr_in SOCKADDR_IN;
 typedef SOCKADDR_IN *PSOCKADDR_IN;
 typedef int SOCKET;
 typedef struct hostent HOSTENT;
 typedef in_addr IN_ADDR;
 typedef struct sockaddr SOCKADDR;
-typedef struct sockaddr_in SOCKADDR_IN;
 typedef struct linger LINGER;
 typedef struct timeval TIMEVAL;
 typedef socklen_t SOCKLEN;
@@ -68,8 +65,8 @@ typedef int WSADATA;  // not used in BSD sockets.
 #define WSAStartup(a, b) (0)
 #define WSACleanup() (0)
 #define WSAGetLastError() (errno)
-#define INVALID_SOCKET -1
-#define SOCKET_ERROR -1
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
 #define closesocket(s) close(s)
 #define ioctlsocket(s, t, v) ioctl(s, t, v)
 #endif
@@ -114,6 +111,7 @@ class RProtocolBSDIP : public RSocket::RProtocol
 	public:
 		SOCKET	m_sock;									// Socket
 		int16_t		m_sType;									// Type of socket (RSocket::typ*)
+		bool		m_bNonBlocking;						// Whether non-blocking mode was requested
 
 	//------------------------------------------------------------------------------
 	// Static Variables
@@ -272,6 +270,9 @@ class RProtocolBSDIP : public RSocket::RProtocol
 		// NOTE: Derived classes MUST call base class implimentation!
 		void Init(void);
 };
+
+static_assert(sizeof(RSocket::Address) == sizeof(RProtocolBSDIP::AddressIP),
+	"RSocket::Address and RProtocolBSDIP::AddressIP must match in size on 64-bit (LP64) builds");
 
 #endif //PROTOBSDIP_H
 

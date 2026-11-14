@@ -325,9 +325,9 @@
 // Browser dialog.
 #define GUI_ID_HOST_LISTBOX		1010
 
-#define SERVER_GUI					"res/shell/Server.gui"
-#define CLIENT_GUI					"res/shell/Client.gui"
-#define BROWSER_GUI					"res/shell/Browser.gui"
+#define SERVER_GUI					"res/shell/server.gui"
+#define CLIENT_GUI					"res/shell/client.gui"
+#define BROWSER_GUI					"res/shell/browser.gui"
 #define GUI_DIR						"menu/"
 
 // Note that this is evaluated at compile time, so even
@@ -570,7 +570,7 @@ static int32_t			ms_lNextOptionsUpdateTime;		// Next time to send an options upd
 
 static RTxt*		ms_ptxtNetProb	= NULL;			// Net problem GUI.
 static bool			m_bNetWatchdogExpired	= false;	// Whether net blocking expired
-static bool			ms_bCoopLevels	= false;			// true, to use cooperative levels.
+static bool			ms_bCoopLevels	= true;			// true, to use cooperative levels (default Co-Op on Android).
 
 // This is used by UpdateDialog() to perform GUI processing.
 static RProcessGui	ms_pgDoGui;
@@ -578,7 +578,7 @@ static RProcessGui	ms_pgDoGui;
 // Linkable vars.
 static bool			ms_bTimeLimit	= false;			// Enable Time Limit if true.
 static bool			ms_bKillLimit	= false;			// Enable Kill Limit if true.
-static bool			ms_bCoopMode = false;			// true, for cooperative mode (false for deathmatch).
+static bool			ms_bCoopMode = true;			// true, for cooperative mode (default Co-Op on Android).
 
 static GuiLink			ms_aglServerLinkage[]	=
 	{
@@ -1605,7 +1605,7 @@ static int16_t UpdateListBox(					// Returns 0 on success.
 		while (phostslistDropped->GetHead())
 			{
 			// Get pointer to first host in list
-			U32 u32User = phostslistDropped->GetHeadData().m_u32User;
+			U64 u32User = phostslistDropped->GetHeadData().m_u32User;
 
 			// We should have already been using this.
 			ASSERT(u32User);
@@ -3207,7 +3207,81 @@ static int16_t BrowseForSelf(
 		if (!bFoundSelf)
 			{
 			sResult = -1;
+			#ifndef WIN32
+			// Fallback for Android Wi-Fi / Mobile Hotspot where UDP broadcast loopback may not echo back to self:
+			// detect the active non-loopback LAN IPv4 address via SIOCGIFCONF or UDP route probe.
+			{
+				struct in_addr localIp;
+				localIp.s_addr = htonl(INADDR_LOOPBACK);
+				bool bGotLanIp = false;
+				int probeSock = socket(AF_INET, SOCK_DGRAM, 0);
+				if (probeSock >= 0)
+					{
+					char ifBuf[4096];
+					struct ifconf ifc;
+					memset(&ifc, 0, sizeof(ifc));
+					ifc.ifc_len = sizeof(ifBuf);
+					ifc.ifc_buf = ifBuf;
+					if (ioctl(probeSock, SIOCGIFCONF, &ifc) == 0)
+						{
+						int numReqs = ifc.ifc_len / (int)sizeof(struct ifreq);
+						for (int i = 0; i < numReqs; i++)
+							{
+							struct ifreq reqFlags = ifc.ifc_req[i];
+							if (ioctl(probeSock, SIOCGIFFLAGS, &reqFlags) == 0 &&
+								(reqFlags.ifr_flags & IFF_UP) &&
+								!(reqFlags.ifr_flags & IFF_LOOPBACK) &&
+								ifc.ifc_req[i].ifr_addr.sa_family == AF_INET)
+								{
+								struct in_addr cand = ((struct sockaddr_in*)&ifc.ifc_req[i].ifr_addr)->sin_addr;
+								if (cand.s_addr != htonl(INADDR_ANY) && cand.s_addr != htonl(INADDR_LOOPBACK))
+									{
+									localIp = cand;
+									bGotLanIp = true;
+									// Prefer Wi-Fi / Hotspot interfaces (wlan*, ap*, swlan*, rndis*)
+									if (strncmp(reqFlags.ifr_name, "wlan", 4) == 0 ||
+										strncmp(reqFlags.ifr_name, "ap", 2) == 0 ||
+										strncmp(reqFlags.ifr_name, "swlan", 5) == 0)
+										break;
+									}
+								}
+							}
+						}
+					if (!bGotLanIp)
+						{
+						struct sockaddr_in remoteAddr;
+						memset(&remoteAddr, 0, sizeof(remoteAddr));
+						remoteAddr.sin_family = AF_INET;
+						remoteAddr.sin_port = htons(80);
+						inet_aton("10.255.255.255", &remoteAddr.sin_addr);
+						if (connect(probeSock, (struct sockaddr*)&remoteAddr, sizeof(remoteAddr)) == 0)
+							{
+							struct sockaddr_in nameAddr;
+							socklen_t nameLen = sizeof(nameAddr);
+							if (getsockname(probeSock, (struct sockaddr*)&nameAddr, &nameLen) == 0 &&
+								nameAddr.sin_addr.s_addr != htonl(INADDR_ANY))
+								{
+								localIp = nameAddr.sin_addr;
+								}
+							}
+						}
+					close(probeSock);
+					}
+				RProtocolBSDIP::AddressIP* pip = (RProtocolBSDIP::AddressIP*)paddress;
+				memset(pip, 0, sizeof(*pip));
+				pip->prototype = RSocket::TCPIP;
+				pip->lAddressLen = sizeof(pip->address);
+				pip->address.sin_family = AF_INET;
+				pip->address.sin_addr = localIp;
+				pip->address.sin_port = htons(g_GameSettings.m_usServerPort);
+				bFoundSelf = true;
+				sResult = 0;
+				TRACE("BrowseForSelf(): Resolved local host IP fallback: %s:%u\n",
+					inet_ntoa(localIp), (unsigned)g_GameSettings.m_usServerPort);
+			}
+			#else
 			TRACE("BrowseForSelf(): Couldn't find myself!\n");
+			#endif
 			}
 
 		// Stop browsing

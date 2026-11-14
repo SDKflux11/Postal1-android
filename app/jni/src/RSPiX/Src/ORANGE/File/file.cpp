@@ -356,6 +356,13 @@ extern const char *FindCorrectFile(const char *_pszName, const char *pszMode)
 {
     char *pszName = (char *) alloca(strlen(_pszName) + 1);
     strcpy(pszName, _pszName);
+    #if PLATFORM_UNIX
+    for (char *pSlash = pszName; *pSlash; ++pSlash)
+    {
+        if (*pSlash == '\\')
+            *pSlash = '/';
+    }
+    #endif
 
     static bool initialized = false;
     static bool nohomedir = false;

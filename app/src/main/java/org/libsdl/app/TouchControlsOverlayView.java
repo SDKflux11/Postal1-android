@@ -11,6 +11,7 @@ import android.util.SparseIntArray;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 
 /**
  * True 360-degree analog Twin-Stick + button overlay for Postal 1.
@@ -28,6 +29,7 @@ public class TouchControlsOverlayView extends View {
 
     private static final int CONTROL_NONE = -1;
     private static final int CONTROL_HIDE_UI = 1002;
+    private static final int CONTROL_KB = 1003;
     private static final int BTN_SUICIDE = 3;
 
     private static class VirtualButton {
@@ -107,6 +109,7 @@ public class TouchControlsOverlayView extends View {
     // Buttons & UI state
     private final VirtualButton[] mButtons;
     private final VirtualButton mHideUiButton;
+    private final VirtualButton mKbButton;
     private boolean mCombatUiVisible = true;
 
     // Multi-touch pointer tracking & reference-counted SDL keys
@@ -180,6 +183,7 @@ public class TouchControlsOverlayView extends View {
         };
 
         mHideUiButton = new VirtualButton(CONTROL_HIDE_UI, "HIDE UI", KeyEvent.KEYCODE_UNKNOWN, true, false);
+        mKbButton = new VirtualButton(CONTROL_KB, "KB", KeyEvent.KEYCODE_UNKNOWN, true, false);
     }
 
     private float dp(float value) {
@@ -237,12 +241,14 @@ public class TouchControlsOverlayView extends View {
         float gap = dp(8);
         float leftStart = dp(18);
 
-        // Top-left: ESC, ENTER, F1
+        // Top-left: ESC, ENTER, F1, KB
         mButtons[0].bounds.set(leftStart, topMargin, leftStart + pillW, topMargin + pillH);
         float enterLeft = mButtons[0].bounds.right + gap;
         mButtons[1].bounds.set(enterLeft, topMargin, enterLeft + dp(64), topMargin + pillH);
         float f1Left = mButtons[1].bounds.right + gap;
         mButtons[2].bounds.set(f1Left, topMargin, f1Left + dp(48), topMargin + pillH);
+        float kbLeft = mButtons[2].bounds.right + gap;
+        mKbButton.bounds.set(kbLeft, topMargin, kbLeft + dp(48), topMargin + pillH);
 
         // Top-right: HIDE UI (Eye) and compact Suicide ("☠ K") safely to its left
         float hideW = dp(78);
@@ -271,6 +277,7 @@ public class TouchControlsOverlayView extends View {
                 drawPillButton(canvas, btn, btn.label, false);
             }
         }
+        drawPillButton(canvas, mKbButton, mKbButton.label, false);
         String eyeLabel = mCombatUiVisible ? "\uD83D\uDC41 UI" : "\uD83D\uDC41 SHOW";
         drawPillButton(canvas, mHideUiButton, eyeLabel, false);
 
@@ -441,11 +448,17 @@ public class TouchControlsOverlayView extends View {
     }
 
     private boolean handlePointerDown(int pointerId, float x, float y) {
-        // 1. HIDE UI toggle button
+        // 1. HIDE UI toggle button & KB toggle button
         if (mHideUiButton.hitTest(x, y, mHitSlop)) {
             mHideUiButton.pressed = true;
             mPointerControlMap.put(pointerId, CONTROL_HIDE_UI);
             toggleCombatUi();
+            return true;
+        }
+        if (mKbButton.hitTest(x, y, mHitSlop)) {
+            mKbButton.pressed = true;
+            mPointerControlMap.put(pointerId, CONTROL_KB);
+            toggleSoftKeyboard();
             return true;
         }
 
@@ -490,7 +503,7 @@ public class TouchControlsOverlayView extends View {
 
     private void updateButtonPointerMove(int pointerId, float x, float y) {
         int ctrlId = mPointerControlMap.get(pointerId, CONTROL_NONE);
-        if (ctrlId == CONTROL_HIDE_UI || ctrlId == CONTROL_NONE) {
+        if (ctrlId == CONTROL_HIDE_UI || ctrlId == CONTROL_KB || ctrlId == CONTROL_NONE) {
             return;
         }
 
@@ -536,6 +549,8 @@ public class TouchControlsOverlayView extends View {
             mPointerControlMap.removeAt(idx);
             if (ctrlId == CONTROL_HIDE_UI) {
                 mHideUiButton.pressed = false;
+            } else if (ctrlId == CONTROL_KB) {
+                mKbButton.pressed = false;
             } else {
                 refreshAllButtonStates();
             }
@@ -685,10 +700,21 @@ public class TouchControlsOverlayView extends View {
         }
     }
 
+    private void toggleSoftKeyboard() {
+        try {
+            InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void releaseAllControls() {
         resetLeftStick();
         resetRightStick();
         mHideUiButton.pressed = false;
+        mKbButton.pressed = false;
         mPointerControlMap.clear();
         for (VirtualButton btn : mButtons) {
             setButtonPressed(btn, false);

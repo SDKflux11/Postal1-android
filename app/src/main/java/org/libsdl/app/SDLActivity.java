@@ -835,6 +835,18 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                     mScreenKeyboardShown = false;
 
                     mSurface.requestFocus();
+                    if (SDLActivity.mFullscreenModeActive && context instanceof Activity) {
+                        Window w = ((Activity) context).getWindow();
+                        if (w != null) {
+                            w.getDecorView().setSystemUiVisibility(
+                                    View.SYSTEM_UI_FLAG_FULLSCREEN |
+                                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+                        }
+                    }
                 }
                 break;
             case COMMAND_SET_KEEP_SCREEN_ON:
@@ -1106,6 +1118,49 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
         InputMethodManager imm = (InputMethodManager) SDL.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
         return imm.isAcceptingText();
+    }
+
+    public static boolean isSoftKeyboardVisible() {
+        if (mSingleton == null || mLayout == null) {
+            return mScreenKeyboardShown;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsets insets = mLayout.getRootWindowInsets();
+            if (insets != null) {
+                return insets.isVisible(android.view.WindowInsets.Type.ime());
+            }
+        }
+        return mScreenKeyboardShown;
+    }
+
+    public static void toggleSoftKeyboard() {
+        if (mSingleton == null) {
+            return;
+        }
+        mSingleton.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isSoftKeyboardVisible()) {
+                    sendMessage(COMMAND_TEXTEDIT_HIDE, 0);
+                } else {
+                    new ShowTextInputTask(16, 16, 64, 32).run();
+                    if (mTextEdit != null) {
+                        mTextEdit.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (mTextEdit != null) {
+                                    mTextEdit.requestFocus();
+                                    InputMethodManager imm = (InputMethodManager) SDL.getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+                                    if (imm != null) {
+                                        imm.showSoftInput(mTextEdit, InputMethodManager.SHOW_IMPLICIT);
+                                    }
+                                }
+                            }
+                        }, 40);
+                    }
+                }
+            }
+        });
 
     }
 
@@ -1965,7 +2020,8 @@ class DummyEdit extends View implements View.OnKeyListener {
         ic = new SDLInputConnection(this, true);
 
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT |
-                             InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+                             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS |
+                             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI |
                               EditorInfo.IME_FLAG_NO_FULLSCREEN /* API 11 */;
 
@@ -2031,7 +2087,7 @@ class SDLInputConnection extends BaseInputConnection {
 
     @Override
     public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-        if (Build.VERSION.SDK_INT <= 29 /* Android 10.0 (Q) */) {
+        if (Build.VERSION.SDK_INT <= 29 /* Android 10.0 (Q) */ || (getEditable() != null && getEditable().length() == 0)) {
             // Workaround to capture backspace key. Ref: http://stackoverflow.com/questions>/14560344/android-backspace-in-webview-baseinputconnection
             // and https://bugzilla.libsdl.org/show_bug.cgi?id=2265
             if (beforeLength > 0 && afterLength == 0) {

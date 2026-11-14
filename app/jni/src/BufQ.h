@@ -370,6 +370,58 @@ class CBufQ
 			return Put(&s32Val);
 			}
 
+		int32_t Put(
+			U64* pu64Buf,
+			int32_t lNum = 1)
+			{
+			int32_t	lNumPut	= -1;
+			U8*	pu8Buf	= (U8*)pu64Buf;
+			#ifdef SYS_ENDIAN_BIG
+				while (++lNumPut < lNum)
+					{
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					Put(*pu8Buf++);
+					if (!Put(*pu8Buf++))
+						break;
+					}
+			#else
+				while (++lNumPut < lNum)
+					{
+					Put(*(pu8Buf + 7));
+					Put(*(pu8Buf + 6));
+					Put(*(pu8Buf + 5));
+					Put(*(pu8Buf + 4));
+					Put(*(pu8Buf + 3));
+					Put(*(pu8Buf + 2));
+					Put(*(pu8Buf + 1));
+					if (!Put(*(pu8Buf + 0)))
+						break;
+					pu8Buf	+= 8;
+					}
+			#endif
+			return lNumPut;
+			}
+
+		int32_t Put(S64* ps64Buf, int32_t lNum = 1)
+			{
+			return Put((U64*)ps64Buf, lNum);
+			}
+
+		int32_t Put(U64 u64Val)
+			{
+			return Put(&u64Val);
+			}
+
+		int32_t Put(S64 s64Val)
+			{
+			return Put(&s64Val);
+			}
+
 		///////////////////////////////////////////////////////////////////////////////
 		// Various flavors of Get()
 		///////////////////////////////////////////////////////////////////////////////
@@ -483,6 +535,48 @@ class CBufQ
 			int32_t lNum = 1)		// In:  Number of S32s to get.
 			{
 			return Get((U32*)ps32Buf, lNum);
+			}
+
+		int32_t Get(
+			U64* pu64Buf,
+			int32_t lNum = 1)
+			{
+			int32_t	lNumGot	= -1;
+			U8*	pu8Buf	= (U8*)pu64Buf;
+			#ifdef SYS_ENDIAN_BIG
+				while (++lNumGot < lNum)
+					{
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					Get(pu8Buf++);
+					if (!Get(pu8Buf++))
+						break;
+					}
+			#else
+				while (++lNumGot < lNum)
+					{
+					Get(pu8Buf + 7);
+					Get(pu8Buf + 6);
+					Get(pu8Buf + 5);
+					Get(pu8Buf + 4);
+					Get(pu8Buf + 3);
+					Get(pu8Buf + 2);
+					Get(pu8Buf + 1);
+					if (!Get(pu8Buf + 0))
+						break;
+					pu8Buf	+= 8;
+					}
+			#endif
+			return lNumGot;
+			}
+
+		int32_t Get(S64* ps64Buf, int32_t lNum = 1)
+			{
+			return Get((U64*)ps64Buf, lNum);
 			}
 
 		///////////////////////////////////////////////////////////////////////////////

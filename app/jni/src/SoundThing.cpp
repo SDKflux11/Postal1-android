@@ -983,7 +983,8 @@ void CSoundThing::ProcessMessages(void)
 ////////////////////////////////////////////////////////////////////////////////
 int32_t CSoundThing::GetRandom(void)
 	{
-	return (((ms_lGetRandomSeed = ms_lGetRandomSeed * 214013L + 2531011L) >> 16) & 0x7fff);
+	ms_lGetRandomSeed = (int32_t)((uint32_t)ms_lGetRandomSeed * 214013U + 2531011U);
+	return ((ms_lGetRandomSeed >> 16) & 0x7fff);
 	}
 
 ////////////////////////////////////////////////////////////////////////////////

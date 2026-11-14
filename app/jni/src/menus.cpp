@@ -794,18 +794,18 @@ extern Menu	menuMain =
 
 	// Position info.
 		{	// x, y, w, h, sPosX, sPosY, sItemSpacingY, sIndicatorSpacingX,
-		MENU_RECT_SM,					// menu x, y, w, h
+		MENU_RECT_MD,					// menu x, y, w, h
 		-60,								// menu header x offset
-		MENU_HEAD_Y_SM,				// menu header y offset
-		MENU_ITEM_X_SM,				// menu items x offset
-		MENU_ITEM_Y_SM,				// menu items y offset
-		MENU_ITEM_SPACE_Y_SM,		// vertical space between menu items
-		MENU_ITEM_IND_SPACE_X_SM,	// horizontal space between indicator and menu items
+		MENU_HEAD_Y_MD,				// menu header y offset
+		MENU_ITEM_X_MD,				// menu items x offset
+		MENU_ITEM_Y_MD,				// menu items y offset
+		MENU_ITEM_SPACE_Y_MD,		// vertical space between menu items
+		MENU_ITEM_IND_SPACE_X_MD,	// horizontal space between indicator and menu items
 		},
 
 	// Background info.
 		{	// pszFile, u32BackColor, sStartIndex, sNumEntries
-		MENU_BG_SM, 
+		MENU_BG_MD, 
 		MENU_BG_COLOR,		// Background color.
 		PAL_SET_START,		// Starting palette index to set.
 		PAL_SET_NUM,		// Number of entries to set.
@@ -871,6 +871,9 @@ extern Menu	menuMain =
 #else
 		{	// pszText,						sEnabled,	pmenu,				pgui
 			{ g_pszMainMenu_Start,		TRUE,			&menuStart/*Single*/,			NULL,			},
+			#ifndef MULTIPLAYER_REMOVED
+			{ g_pszStartGameMenu_Multiplayer,	TRUE,	&menuStartMulti,	NULL,			},
+			#endif
 			{ g_pszMainMenu_Options,	TRUE,			&menuOptions,		NULL,			},
 
 			#ifndef EDITOR_REMOVED
@@ -2682,9 +2685,9 @@ extern Menu	menuStart =
 	// Menu items.
 		{	// pszText,											sEnabled,	pmenu,				pgui
 			{ g_pszStartGameMenu_SinglePlayer,			TRUE,			&menuStartSingle,	NULL,	},
-            //#ifndef MULTIPLAYER_REMOVED
+			#ifndef MULTIPLAYER_REMOVED
 			{ g_pszStartGameMenu_Multiplayer,			TRUE,			&menuStartMulti,	NULL, },
-            //#endif
+			#endif
 			{ g_pszStartGameMenu_Demo,						TRUE,			&menuStartDemo,	NULL,	},
 			{ "",													FALSE,		NULL,					NULL, },
 			NULL							// Terminates list.
@@ -3741,7 +3744,14 @@ static bool MainMenuChoice(	// Returns true to accept, false to deny choice.
 
 	switch (sMenuItem)
 		{
+		#ifndef MULTIPLAYER_REMOVED
+		case 1:
+			bAcceptChoice = Game_StartMultiPlayerGame(sMenuItem);
+			break;
+		case 3:
+		#else
 		case 2:
+		#endif
 			#if defined(SPAWN) || defined(EDITOR_REMOVED)
 				// Exit
 			#else
@@ -3750,7 +3760,11 @@ static bool MainMenuChoice(	// Returns true to accept, false to deny choice.
 			#endif
 			break;
 
+		#ifndef MULTIPLAYER_REMOVED
+		case 4:
+		#else
 		case 3:
+		#endif
 			#if defined(DEMO)
 				// Buy
 				Game_Buy();
@@ -5525,7 +5539,7 @@ static int16_t MultiOptionsInit(	// Returns 0 on success, non-zero to cancel men
 			rspReleaseResource(&g_resmgrShell, &ms_ptxtProto);
 
 			// Clear menu's pointer.
-			pmenuCur->ami[2].pgui	= NULL;
+			pmenuCur->ami[1].pgui	= NULL;
 			}
 
 		if (ms_ptxtBandwidth)
@@ -5534,7 +5548,7 @@ static int16_t MultiOptionsInit(	// Returns 0 on success, non-zero to cancel men
 			rspReleaseResource(&g_resmgrShell, &ms_ptxtBandwidth);
 
 			// Clear menu's pointer.
-			pmenuCur->ami[3].pgui	= NULL;
+			pmenuCur->ami[2].pgui	= NULL;
 			}
 		}
 

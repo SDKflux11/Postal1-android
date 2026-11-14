@@ -245,15 +245,15 @@ CGameSettings::CGameSettings(void)
 	m_sPainFrequency = 8;
 	m_ulUnlockedLevels = 1114113; // first levels of original, SD and Plus
 
-	m_szServerName[0]				= 0;
+	strcpy(m_szServerName, "192.168.0.109");
 	m_usServerPort					= 61663;
 	m_usProtocol					= RSocket::FirstProtocol;
-	m_szPlayerName[0]				= 0;
+	strcpy(m_szPlayerName, "PostalDude");
 	m_sPlayerColorIndex			= 0;
 	m_sNetBandwidth				= Net::Analog28_8;
 	m_sHostMinBandwidth			= Net::Analog14_4;
 	m_sHostMaxPlayers				= Net::MaxNumIDs;
-	m_szHostName[0]				= 0;
+	strcpy(m_szHostName, "AndroidHost");
 	m_sHostResetScoresEachLevel = TRUE;
 	m_sHostRejuvenate				= TRUE;
 	m_sHostTimeLimit				= 0;
@@ -477,6 +477,8 @@ int16_t CGameSettings::LoadPrefs(
 	if (m_usProtocol >= RSocket::NumProtocols)
 		m_usProtocol = RSocket::FirstProtocol;
 	pPrefs->GetVal("Multiplayer", "Name", m_szPlayerName, m_szPlayerName);
+	if (m_szPlayerName[0] == '\0')
+		strcpy(m_szPlayerName, "PostalDude");
 	pPrefs->GetVal("Multiplayer", "Color", m_sPlayerColorIndex, &m_sPlayerColorIndex);
 	pPrefs->GetVal("Multiplayer", "Bandwidth", m_sNetBandwidth, &m_sNetBandwidth);
 	if (m_sNetBandwidth < 0) m_sNetBandwidth = 0;
@@ -488,7 +490,9 @@ int16_t CGameSettings::LoadPrefs(
 	if (m_sHostMaxPlayers > Net::MaxNumIDs)
 		m_sHostMaxPlayers = Net::MaxNumIDs;
 	char szHostName[RSP_MAX_PATH];
-	pPrefs->GetVal("Multiplayer", "HostName", "", szHostName);
+	pPrefs->GetVal("Multiplayer", "HostName", "AndroidHost", szHostName);
+	if (szHostName[0] == '\0')
+		strcpy(szHostName, "AndroidHost");
 	strncpy(m_szHostName, szHostName, sizeof(m_szHostName));
 	m_szHostName[sizeof(m_szHostName)-1] = 0;
 	pPrefs->GetVal("Multiplayer", "HostResetScoresEachLevel", m_sHostResetScoresEachLevel, &m_sHostResetScoresEachLevel);
